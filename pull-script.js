@@ -1,25 +1,29 @@
 // ==========================================
-// DYNAMIC GITHUB FOLDER SYNC + CONFIG MANAGER
+// GITHUB SYNC WITH FIXED FILEMANAGER API
 // ==========================================
 
 const githubUser = "justwillj";
 const repoName = "mood-dashboard-app";
 const branch = "main";
-const targetFolder = "scripts"; // Folder in your repo root
+const targetFolder = "scripts";
 
-const fm = FileManager.local();
+let fm = FileManager.iCloud();
+try {
+  fm.documentsDirectory();
+} catch (e) {
+  fm = FileManager.local();
+}
+
 const userConfigPath = fm.joinPath(fm.documentsDirectory(), "user_config.json");
 
 async function runSync() {
-  // 1. Check if configuration exists or if user wants to set it up
   if (!fm.fileExists(userConfigPath)) {
     let success = await promptForNames(
       "Mood Dashboard Setup",
-      "Please enter the names for your shared dashboard:",
+      "Enter dashboard names:",
     );
-    if (!success) return; // Cancelled
+    if (!success) return;
   } else {
-    // If config already exists, give options to Sync or Change Names
     let menuAlert = new Alert();
     menuAlert.title = "Dashboard Manager";
     menuAlert.message = "Choose an action:";
@@ -28,18 +32,14 @@ async function runSync() {
     menuAlert.addCancelAction("Cancel");
 
     let choice = await menuAlert.presentAlert();
-    if (choice === -1) return; // Cancelled
+    if (choice === -1) return;
     if (choice === 1) {
-      // User chose to change names
-      let success = await promptForNames(
-        "Update Names",
-        "Update your dashboard names below:",
-      );
+      let success = await promptForNames("Update Names", "Update names below:");
       if (!success) return;
     }
   }
 
-  // 2. GitHub API endpoint to list contents of repository folder
+  // Add timestamp query param to bypass GitHub raw CDN caching
   let apiUrl =
     "https://api.github.com/repos/" +
     githubUser +
@@ -48,7 +48,9 @@ async function runSync() {
     "/contents/" +
     targetFolder +
     "?ref=" +
-    branch;
+    branch +
+    "&t=" +
+    Date.now();
 
   try {
     let req = new Request(apiUrl);
@@ -59,7 +61,7 @@ async function runSync() {
 
     if (!Array.isArray(items)) {
       throw new Error(
-        "Could not read directory contents. Check your folder name or repository visibility.",
+        "Could not read directory contents. Check folder name or repo visibility.",
       );
     }
 
@@ -69,7 +71,9 @@ async function runSync() {
       let item = items[i];
 
       if (item.type === "file" && item.name.endsWith(".js")) {
-        let downloadUrl = item.download_url;
+        let downloadUrl = item.download_url
+          ? item.download_url + "?t=" + Date.now()
+          : null;
 
         if (downloadUrl) {
           let fileReq = new Request(downloadUrl);
@@ -77,34 +81,41 @@ async function runSync() {
 
           if (scriptContent && scriptContent.trim().length > 0) {
             let filePath = fm.joinPath(fm.documentsDirectory(), item.name);
+
+            // Overwrite file with new content
             fm.writeString(filePath, scriptContent);
+
+            // Check if file is stored in iCloud and force download/sync if needed
+            if (fm.isFileStoredIniCloud && fm.isFileStoredIniCloud(filePath)) {
+              try {
+                await fm.downloadFileFromiCloud(filePath);
+              } catch (err) {
+                console.log("iCloud sync notice: " + err.message);
+              }
+            }
+
             syncedCount++;
-            console.log("Synced script: " + item.name);
+            console.log("Successfully updated: " + item.name);
           }
         }
       }
     }
 
     let alert = new Alert();
-    alert.title = "Auto-Sync Complete";
-    alert.message =
-      "Successfully discovered and synced " +
-      syncedCount +
-      " script(s) from GitHub!";
+    alert.title = "Sync Successful!";
+    alert.message = "Updated " + syncedCount + " script(s) from GitHub.";
     alert.addAction("OK");
     await alert.present();
   } catch (error) {
     let alert = new Alert();
     alert.title = "Sync Failed";
-    alert.message = "Error communicating with GitHub API:\n\n" + error.message;
+    alert.message = error.message;
     alert.addAction("OK");
     await alert.present();
   }
 }
 
-// Helper function to handle name input and empty validation
 async function promptForNames(title, message) {
-  // Load existing values if available to pre-fill or fallback
   let existingMyName = "You";
   let existingPartnerName = "Partner";
   if (fm.fileExists(userConfigPath)) {
@@ -118,20 +129,16 @@ async function promptForNames(title, message) {
   let setupAlert = new Alert();
   setupAlert.title = title;
   setupAlert.message = message;
-  setupAlert.addTextField(existingMyName, existingMyName);
-  setupAlert.addTextField(existingPartnerName, existingPartnerName);
+  setupAlert.addTextField("Your Name", existingMyName);
+  setupAlert.addTextField("Partner Name", existingPartnerName);
   setupAlert.addAction("Save");
   setupAlert.addCancelAction("Cancel");
 
   let res = await setupAlert.presentAlert();
   if (res === -1) return false;
 
-  let myName = setupAlert.textFieldValue(0).trim();
-  let partnerName = setupAlert.textFieldValue(1).trim();
-
-  // Validation: If fields are left empty, fallback gracefully instead of breaking
-  if (!myName) myName = "You";
-  if (!partnerName) partnerName = "Partner";
+  let myName = setupAlert.textFieldValue(0).trim() || "You";
+  let partnerName = setupAlert.textFieldValue(1).trim() || "Partner";
 
   let configData = {
     myUserName: myName,

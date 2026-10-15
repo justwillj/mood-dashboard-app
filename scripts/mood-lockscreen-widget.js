@@ -2,7 +2,7 @@
 // These must be at the very top of the file. Do not edit.
 // icon-color: pink; icon-glyph: lock;
 // ==========================================
-// PARTNER MOOD LOCK SCREEN WIDGET
+// PARTNER MOOD LOCK SCREEN WIDGET (ROBUST)
 // ==========================================
 
 const fm = FileManager.local();
@@ -13,7 +13,7 @@ let partnerUserName = "Partner";
 if (fm.fileExists(userConfigPath)) {
   try {
     let config = JSON.parse(fm.readString(userConfigPath));
-    partnerUserName = config.partnerUserName || "Partner";
+    partnerUserName = (config.partnerUserName || "Partner").trim();
   } catch (e) {
     console.log("Could not read user_config.json, using default.");
   }
@@ -68,11 +68,17 @@ if (moodCalendar) {
   });
 
   for (let r of reminders) {
-    let match = r.title.match(/^\[(.*?)\]\s*(.*)\$/);
-    let user = match ? match[1] : "Unknown";
-    let mood = match ? match[2] : r.title;
+    let title = r.title || "";
+    let match = title.match(/^\[(.*?)\]\s*(.*)\$/);
 
-    if (user.toLowerCase() === partnerUserName.toLowerCase()) {
+    let user = match ? match[1].trim() : "";
+    let mood = match ? match[2].trim() : title.trim();
+
+    // Flexible match against partner name or fallback if bracket tag is missing/different
+    if (
+      user.toLowerCase() === partnerUserName.toLowerCase() ||
+      (!match && title.toLowerCase().includes(partnerUserName.toLowerCase()))
+    ) {
       partnerLatest = {
         mood: mood,
         note: r.notes || "",
@@ -87,15 +93,15 @@ let partnerStatusText = partnerLatest ? partnerLatest.mood : "No Check-in";
 let partnerNoteText = partnerLatest ? partnerLatest.note : "";
 let relativeTime = partnerLatest ? formatRelativeTime(partnerLatest.date) : "";
 
-let matchedPreset = moodPresets.find(
-  (p) => p.title.toLowerCase() === partnerStatusText.toLowerCase(),
+let matchedPreset = moodPresets.find((p) =>
+  p.title.toLowerCase().includes(partnerStatusText.toLowerCase()),
 );
 let energyLevel = matchedPreset ? matchedPreset.energy : 3;
 let energyIconString = getEnergyIcon(energyLevel);
 
 let widget = new ListWidget();
 widget.setPadding(4, 6, 4, 6);
-widget.url = "scriptable://run?scriptName=Dual%2520Mood%2520Dashboard";
+widget.url = "scriptable://run?scriptName=Dual%20Mood%20Dashboard";
 
 let mainStack = widget.addStack();
 mainStack.layoutHorizontally();
@@ -150,7 +156,6 @@ function formatRelativeTime(date) {
 
 if (config.runsInWidget) {
   Script.setWidget(widget);
-  // Request iOS to background-refresh roughly every 20 minutes
   widget.refreshAfterDate = new Date(Date.now() + 20 * 60 * 1000);
 } else {
   widget.presentAccessoryRectangular();
