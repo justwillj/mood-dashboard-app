@@ -74,7 +74,6 @@ if (moodCalendar) {
     let user = match ? match[1].trim() : "";
     let mood = match ? match[2].trim() : title.trim();
 
-    // Flexible match against partner name or fallback if bracket tag is missing/different
     if (
       user.toLowerCase() === partnerUserName.toLowerCase() ||
       (!match && title.toLowerCase().includes(partnerUserName.toLowerCase()))
