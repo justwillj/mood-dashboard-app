@@ -7,7 +7,7 @@ const repoName = "mood-dashboard-app";
 const branch = "main";
 const targetFolder = "scripts"; // Folder in your repo root
 
-const fm = FileManager.local();
+const fm = FileManager.iCloud();
 
 async function syncFolder() {
   // GitHub API endpoint to list contents of a repository folder
