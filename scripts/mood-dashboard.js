@@ -2,28 +2,47 @@
 // These must be at the very top of the file. Do not edit.
 // icon-color: purple; icon-glyph: chart-line;
 // ==========================================
-// DUAL MOOD DASHBOARD (Collapsible + Long Mock History)
+// DUAL MOOD DASHBOARD
 // ==========================================
 
-const myUserName = "You";
-const partnerUserName = "Partner";
+const fm = FileManager.local();
+const userConfigPath = fm.joinPath(fm.documentsDirectory(), "user_config.json");
+
+let myUserName = "You";
+let partnerUserName = "Partner";
+
+if (fm.fileExists(userConfigPath)) {
+  try {
+    let config = JSON.parse(fm.readString(userConfigPath));
+    myUserName = config.myUserName || "You";
+    partnerUserName = config.partnerUserName || "Partner";
+  } catch (e) {
+    console.log("Could not read user_config.json, using defaults.");
+  }
+}
 
 const listName = "Mood Dashboard";
-const fm = FileManager.local();
 const configPath = fm.joinPath(fm.documentsDirectory(), "mood_presets.json");
 
 const defaults = [
-  "☕ Cozy",
-  "🟢 Locked In",
-  "🟡 Chill",
-  "🔴 Low Battery",
-  "🟣 Creative",
+  { title: "🟢 Locked In", energy: 4 },
+  { title: "⚡ Focused", energy: 4 },
+  { title: "🟣 Creative", energy: 3 },
+  { title: "🟡 Chill", energy: 2 },
+  { title: "☕ Cozy", energy: 2 },
+  { title: "🔴 Low Battery", energy: 1 },
 ];
-let moods = fm.fileExists(configPath)
+
+let rawMoods = fm.fileExists(configPath)
   ? JSON.parse(fm.readString(configPath))
   : defaults;
-if (!fm.fileExists(configPath))
-  fm.writeString(configPath, JSON.stringify(defaults));
+let moods = rawMoods.map((m) =>
+  typeof m === "string" ? { title: m, energy: 3 } : m,
+);
+
+if (!fm.fileExists(configPath)) {
+  fm.writeString(configPath, JSON.stringify(defaults, null, 2));
+}
 
 let calendars = await Calendar.forReminders();
 let cal = calendars.find(
@@ -45,6 +64,7 @@ const MONTHS = [
   "November",
   "December",
 ];
+
 const esc = (s) =>
   String(s).replace(
     /[&<>"']/g,
@@ -53,6 +73,7 @@ const esc = (s) =>
         c
       ],
   );
+
 const sleep = (ms) => new Promise((r) => Timer.schedule(ms, false, r));
 const getTime = (r) =>
   r.creationDate ? new Date(r.creationDate).getTime() : 0;
@@ -79,14 +100,12 @@ function parseMood(title) {
 function buildMockData() {
   let now = new Date();
   let moodPool = [
-    "🟢 Locked In",
-    "☕ Cozy",
-    "🟡 Chill",
-    "🔴 Low Battery",
-    "🟣 Creative",
-    "⚡ Focused",
-    "😴 Sleepy",
-    "🎉 Celebrating",
+    { title: "🟢 Locked In", energy: 4 },
+    { title: "☕ Cozy", energy: 2 },
+    { title: "🟡 Chill", energy: 2 },
+    { title: "🔴 Low Battery", energy: 1 },
+    { title: "🟣 Creative", energy: 3 },
+    { title: "⚡ Focused", energy: 4 },
   ];
   let notePool = [
     "Working on Scriptable dashboard",
@@ -100,13 +119,6 @@ function buildMockData() {
     "Pool day",
     "Cooking something new",
     "Rainy day reset",
-    "Gym then errands",
-    "Family dinner",
-    "Reading in bed",
-    "Big deadline today",
-    "Coffee shop session",
-    "Long walk",
-    "Game night",
   ];
   let out = [];
   let n = 0;
@@ -116,21 +128,22 @@ function buildMockData() {
     slots.forEach(function (k) {
       let who = n % 2 === 0 ? myUserName : partnerUserName;
       let date;
+      let selectedPreset = moodPool[(n + m) % moodPool.length];
       if (m === 0) {
-        let offsets = [0, 45 * 60000, 5 * 3600000];
-        date = new Date(now.getTime() - offsets[k]);
+        let offsets = [0, 2700000, 18000000];
+        date = new Date(now.getTime() - (offsets[k] || k * 3600000));
       } else {
         date = new Date(
           now.getFullYear(),
           now.getMonth() - m,
-          24 - k * 7,
-          8 + ((n * 3) % 13),
-          (n * 17) % 60,
+          24 - k,
+          8 + (n % 13),
+          n % 60,
         );
       }
       out.push({
-        title: "[" + who + "] " + moodPool[(n * 3 + m) % moodPool.length],
-        notes: notePool[(n * 5 + m) % notePool.length],
+        title: "[" + who + "] " + selectedPreset.title,
+        notes: notePool[(n + m) % notePool.length],
         creationDate: date,
       });
       n++;
@@ -144,7 +157,6 @@ async function buildHtml() {
   if (!reminders || reminders.length === 0) reminders = buildMockData();
   reminders.sort((a, b) => getTime(b) - getTime(a));
 
-  // Latest mood per person
   let myLatest = null;
   let partnerLatest = null;
   for (let r of reminders) {
@@ -172,7 +184,6 @@ async function buildHtml() {
     ? formatDate(partnerLatest.r.creationDate)
     : "--:--";
 
-  // Group by year -> month (reminders are already newest first)
   let years = [];
   let grouped = {};
   for (let r of reminders) {
@@ -313,12 +324,12 @@ async function logMood() {
   a.title = "Log Mood (" + myUserName + ")";
   a.message = "Select your current status:";
   a.addTextField("Add an optional note...", "");
-  moods.forEach((m) => a.addAction(m));
+  moods.forEach((m) => a.addAction(m.title));
   a.addCancelAction("Cancel");
   let res = await a.presentAlert();
   if (res === -1) return;
   let r = new Reminder();
-  r.title = "[" + myUserName + "] " + moods[res];
+  r.title = "[" + myUserName + "] " + moods[res].title;
   r.notes = a.textFieldValue(0) || "";
   r.calendar = cal;
   await r.save();
@@ -328,16 +339,28 @@ async function createMood() {
   let a = new Alert();
   a.title = "Create Custom Mood";
   a.message = "Enter a new mood title:";
-  a.addTextField("e.g. ⚡ Focused", "");
-  a.addAction("Save Mood");
+  a.addTextField("e.g. 🚀 Hype Mode", "");
+  a.addAction("Next: Set Energy");
   a.addCancelAction("Cancel");
   let res = await a.presentAlert();
   if (res === -1) return;
   let name = a.textFieldValue(0).trim();
-  if (name) {
-    moods.push(name);
-    fm.writeString(configPath, JSON.stringify(moods));
-  }
+  if (!name) return;
+
+  let eAlert = new Alert();
+  eAlert.title = "Select Energy Level";
+  eAlert.message = "Choose power bars for: " + name;
+  eAlert.addAction("████ (4 - High)");
+  eAlert.addAction("███░ (3 - Medium-High)");
+  eAlert.addAction("██░░ (2 - Medium-Low)");
+  eAlert.addAction("█░░░ (1 - Low)");
+  let eRes = await eAlert.presentAlert();
+  if (eRes === -1) return;
+
+  let energyValue = 4 - eRes;
+
+  moods.push({ title: name, energy: energyValue });
+  fm.writeString(configPath, JSON.stringify(moods, null, 2));
 }
 
 let pending = null;
@@ -360,7 +383,7 @@ wv.shouldAllowRequest = (req) => {
 await wv.loadHTML(await buildHtml(), "http://localhost/");
 wv.present(true).then(() => {
   closed = true;
-}); // don't await
+});
 
 while (!closed) {
   if (pending) {
