@@ -2,7 +2,7 @@
 // These must be at the very top of the file. Do not edit.
 // icon-color: purple; icon-glyph: chart-line;
 // ==========================================
-// DUAL MOOD DASHBOARD
+// MOOD DASHBOARD (FULL SCRIPT)
 // ==========================================
 
 const fm = FileManager.local();
@@ -25,7 +25,7 @@ const listName = "Mood Dashboard";
 const configPath = fm.joinPath(fm.documentsDirectory(), "mood_presets.json");
 
 const defaults = [
-  { title: "🟢 Locked In", energy: 4 },
+  { title: "🟢 Locked In", energy: 5 },
   { title: "⚡ Focused", energy: 4 },
   { title: "🟣 Creative", energy: 3 },
   { title: "🟡 Chill", energy: 2 },
@@ -96,11 +96,13 @@ function parseMood(title) {
   return { user: "Unknown", mood: title };
 }
 
-// ---- MOCK DATA: ~14 months back, generated, never saved to Reminders ----
+let myLatestReminderRef = null;
+
+// ---- MOCK DATA GENERATOR ----
 function buildMockData() {
   let now = new Date();
   let moodPool = [
-    { title: "🟢 Locked In", energy: 4 },
+    { title: "🟢 Locked In", energy: 5 },
     { title: "☕ Cozy", energy: 2 },
     { title: "🟡 Chill", energy: 2 },
     { title: "🔴 Low Battery", energy: 1 },
@@ -171,6 +173,9 @@ async function buildHtml() {
     }
     if (myLatest && partnerLatest) break;
   }
+
+  myLatestReminderRef = myLatest ? myLatest.r : null;
+
   let myMood = myLatest ? myLatest.mood : "No Status";
   let myNote =
     myLatest && myLatest.r.notes ? myLatest.r.notes : "Tap 'Log Mood'";
@@ -258,7 +263,8 @@ async function buildHtml() {
     "body{background:#0b0c10;color:#fff;font-family:-apple-system,sans-serif;padding:20px;margin:0}",
     "h2{margin-top:0;margin-bottom:16px;font-size:24px}",
     ".dual-container{display:flex;gap:12px;margin-bottom:20px}",
-    ".hero{flex:1;min-width:0;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.12);border-radius:20px;padding:16px;box-sizing:border-box}",
+    ".hero{flex:1;min-width:0;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.12);border-radius:20px;padding:16px;box-sizing:border-box;cursor:pointer}",
+    ".hero:active{background:rgba(255,255,255,0.15)}",
     ".hero-label{font-size:10px;color:#818cf8;font-weight:700;margin-bottom:6px;text-transform:uppercase;letter-spacing:0.5px}",
     ".hero-title{font-size:20px;font-weight:800;margin-bottom:6px;word-break:break-word}",
     ".note{color:rgba(255,255,255,0.6);font-size:12px;font-style:italic}",
@@ -289,9 +295,10 @@ async function buildHtml() {
     "</script></head><body>" +
     "<h2>Dashboard</h2>" +
     '<div class="dual-container">' +
-    '<div class="hero"><div class="hero-label">YOU (' +
+    '<div class="hero" onclick="window.location.href=\'http://localhost/editMyMood\'">' +
+    '<div class="hero-label">YOU (' +
     esc(myUserName) +
-    ')</div><div class="hero-title">' +
+    ') ✏️</div><div class="hero-title">' +
     esc(myMood) +
     "</div>" +
     '<div class="note" style="margin-bottom:8px;">"' +
@@ -312,6 +319,7 @@ async function buildHtml() {
     "</div>" +
     '<a class="btn" href="http://localhost/log">📝 Log Mood</a>' +
     '<a class="btn btn-sec" href="http://localhost/create">➕ Custom Mood</a>' +
+    '<a class="btn btn-sec" href="http://localhost/delete">🗑️ Manage / Delete Moods</a>' +
     '<h3 style="font-size:16px;color:rgba(255,255,255,0.8);margin:24px 0 10px 0;">History Feed</h3>' +
     "<div>" +
     historyHtml +
@@ -326,13 +334,75 @@ async function logMood() {
   a.addTextField("Add an optional note...", "");
   moods.forEach((m) => a.addAction(m.title));
   a.addCancelAction("Cancel");
+
   let res = await a.presentAlert();
   if (res === -1) return;
+
   let r = new Reminder();
   r.title = "[" + myUserName + "] " + moods[res].title;
   r.notes = a.textFieldValue(0) || "";
   r.calendar = cal;
   await r.save();
+}
+
+async function editMyMood() {
+  if (!myLatestReminderRef) {
+    let errAlert = new Alert();
+    errAlert.title = "No Status Found";
+    errAlert.message = "Log a mood first before editing!";
+    errAlert.addAction("OK");
+    await errAlert.present();
+    return;
+  }
+
+  let p = parseMood(myLatestReminderRef.title);
+
+  let menuAlert = new Alert();
+  menuAlert.title = "Edit Current Status";
+  menuAlert.message = "Status: " + p.mood;
+  menuAlert.addAction("✏️ Edit Note");
+  menuAlert.addAction("🔄 Change Mood Status");
+  menuAlert.addAction("🗑️ Delete This Check-in");
+  menuAlert.addCancelAction("Cancel");
+
+  let choice = await menuAlert.presentAlert();
+  if (choice === -1) return;
+
+  if (choice === 0) {
+    let noteAlert = new Alert();
+    noteAlert.title = "Update Note";
+    noteAlert.addTextField("Your note...", myLatestReminderRef.notes || "");
+    noteAlert.addAction("Save Note");
+    noteAlert.addCancelAction("Cancel");
+
+    let res = await noteAlert.presentAlert();
+    if (res === -1) return;
+
+    myLatestReminderRef.notes = noteAlert.textFieldValue(0);
+    await myLatestReminderRef.save();
+  } else if (choice === 1) {
+    let moodAlert = new Alert();
+    moodAlert.title = "Select New Mood";
+    moods.forEach((m) => moodAlert.addAction(m.title));
+    moodAlert.addCancelAction("Cancel");
+
+    let res = await moodAlert.presentAlert();
+    if (res === -1) return;
+
+    myLatestReminderRef.title = "[" + myUserName + "] " + moods[res].title;
+    await myLatestReminderRef.save();
+  } else if (choice === 2) {
+    let delAlert = new Alert();
+    delAlert.title = "Delete Check-in?";
+    delAlert.message = "This will remove your latest mood check-in.";
+    delAlert.addAction("Delete");
+    delAlert.addCancelAction("Cancel");
+
+    let res = await delAlert.presentAlert();
+    if (res === -1) return;
+
+    await myLatestReminderRef.remove();
+  }
 }
 
 async function createMood() {
@@ -342,24 +412,66 @@ async function createMood() {
   a.addTextField("e.g. 🚀 Hype Mode", "");
   a.addAction("Next: Set Energy");
   a.addCancelAction("Cancel");
+
   let res = await a.presentAlert();
   if (res === -1) return;
+
   let name = a.textFieldValue(0).trim();
   if (!name) return;
 
   let eAlert = new Alert();
   eAlert.title = "Select Energy Level";
-  eAlert.message = "Choose power bars for: " + name;
-  eAlert.addAction("████ (4 - High)");
-  eAlert.addAction("███░ (3 - Medium-High)");
-  eAlert.addAction("██░░ (2 - Medium-Low)");
-  eAlert.addAction("█░░░ (1 - Low)");
+  eAlert.message = "Choose circle dots for: " + name;
+
+  eAlert.addAction("●●●●● (5 - Max)");
+  eAlert.addAction("●●●●○ (4 - High)");
+  eAlert.addAction("●●●○○ (3 - Medium)");
+  eAlert.addAction("●●○○○ (2 - Low-Medium)");
+  eAlert.addAction("●○○○○ (1 - Low)");
+  eAlert.addCancelAction("Cancel");
+
   let eRes = await eAlert.presentAlert();
   if (eRes === -1) return;
 
-  let energyValue = 4 - eRes;
+  let energyValue = 5 - eRes;
 
   moods.push({ title: name, energy: energyValue });
+  fm.writeString(configPath, JSON.stringify(moods, null, 2));
+}
+
+async function deleteMood() {
+  if (moods.length === 0) {
+    let errAlert = new Alert();
+    errAlert.title = "No Moods";
+    errAlert.message = "There are no saved moods to delete.";
+    errAlert.addAction("OK");
+    await errAlert.present();
+    return;
+  }
+
+  let dAlert = new Alert();
+  dAlert.title = "Manage / Delete Moods";
+  dAlert.message = "Select a mood preset to remove:";
+
+  moods.forEach((m) => dAlert.addAction("🗑️ " + m.title));
+  dAlert.addCancelAction("Cancel");
+
+  let res = await dAlert.presentAlert();
+  if (res === -1) return;
+
+  let selectedMood = moods[res];
+
+  let confirmAlert = new Alert();
+  confirmAlert.title = "Confirm Deletion";
+  confirmAlert.message =
+    "Are you sure you want to delete '" + selectedMood.title + "'?";
+  confirmAlert.addAction("Delete");
+  confirmAlert.addCancelAction("Cancel");
+
+  let cRes = await confirmAlert.presentAlert();
+  if (cRes === -1) return;
+
+  moods.splice(res, 1);
   fm.writeString(configPath, JSON.stringify(moods, null, 2));
 }
 
@@ -377,6 +489,14 @@ wv.shouldAllowRequest = (req) => {
     pending = "create";
     return false;
   }
+  if (url.indexOf("localhost/delete") !== -1) {
+    pending = "delete";
+    return false;
+  }
+  if (url.indexOf("localhost/editMyMood") !== -1) {
+    pending = "editMyMood";
+    return false;
+  }
   return true;
 };
 
@@ -391,6 +511,8 @@ while (!closed) {
     pending = null;
     if (action === "log") await logMood();
     if (action === "create") await createMood();
+    if (action === "delete") await deleteMood();
+    if (action === "editMyMood") await editMyMood();
     if (!closed) await wv.loadHTML(await buildHtml(), "http://localhost/");
   } else {
     await sleep(150);

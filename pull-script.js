@@ -1,5 +1,8 @@
+// Variables used by Scriptable.
+// These must be at the very top of the file. Do not edit.
+// icon-color: deep-blue; icon-glyph: magic;
 // ==========================================
-// GITHUB SYNC WITH FIXED FILEMANAGER API
+// GITHUB SYNC (FIXED ITEM ITERATION)
 // ==========================================
 
 const githubUser = "justwillj";
@@ -39,7 +42,7 @@ async function runSync() {
     }
   }
 
-  // Add timestamp query param to bypass GitHub raw CDN caching
+  // GitHub API endpoint for the folder contents
   let apiUrl =
     "https://api.github.com/repos/" +
     githubUser +
@@ -61,7 +64,7 @@ async function runSync() {
 
     if (!Array.isArray(items)) {
       throw new Error(
-        "Could not read directory contents. Check folder name or repo visibility.",
+        "Could not read directory contents. Response was not an array. Check repo visibility or folder name.",
       );
     }
 
@@ -70,40 +73,38 @@ async function runSync() {
     for (let i = 0; i < items.length; i++) {
       let item = items[i];
 
-      if (item.type === "file" && item.name.endsWith(".js")) {
-        let downloadUrl = item.download_url
-          ? item.download_url + "?t=" + Date.now()
-          : null;
+      // Check if it's a JavaScript file
+      if (item.name && item.name.endsWith(".js")) {
+        // Construct standard raw download URL dynamically if download_url is missing
+        let downloadUrl =
+          item.download_url ||
+          `https://raw.githubusercontent.com/${githubUser}/${repoName}/${branch}/${targetFolder}/${item.name}?t=${Date.now()}`;
 
-        if (downloadUrl) {
-          let fileReq = new Request(downloadUrl);
-          let scriptContent = await fileReq.loadString();
+        let fileReq = new Request(downloadUrl);
+        let scriptContent = await fileReq.loadString();
 
-          if (scriptContent && scriptContent.trim().length > 0) {
-            let filePath = fm.joinPath(fm.documentsDirectory(), item.name);
+        if (scriptContent && scriptContent.trim().length > 0) {
+          let filePath = fm.joinPath(fm.documentsDirectory(), item.name);
 
-            // Overwrite file with new content
-            fm.writeString(filePath, scriptContent);
+          // Write fresh content to local disk
+          fm.writeString(filePath, scriptContent);
 
-            // Check if file is stored in iCloud and force download/sync if needed
-            if (fm.isFileStoredIniCloud && fm.isFileStoredIniCloud(filePath)) {
-              try {
-                await fm.downloadFileFromiCloud(filePath);
-              } catch (err) {
-                console.log("iCloud sync notice: " + err.message);
-              }
-            }
-
-            syncedCount++;
-            console.log("Successfully updated: " + item.name);
+          if (fm.isFileStoredIniCloud && fm.isFileStoredIniCloud(filePath)) {
+            try {
+              await fm.downloadFileFromiCloud(filePath);
+            } catch (err) {}
           }
+
+          syncedCount++;
+          console.log("Successfully synced: " + item.name);
         }
       }
     }
 
     let alert = new Alert();
     alert.title = "Sync Successful!";
-    alert.message = "Updated " + syncedCount + " script(s) from GitHub.";
+    alert.message =
+      "Successfully updated " + syncedCount + " script(s) from GitHub.";
     alert.addAction("OK");
     await alert.present();
   } catch (error) {
