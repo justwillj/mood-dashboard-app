@@ -1,8 +1,5 @@
 // Variables used by Scriptable.
 // These must be at the very top of the file. Do not edit.
-// icon-color: pink; icon-glyph: lock;
-// Variables used by Scriptable.
-// These must be at the very top of the file. Do not edit.
 // icon-color: pink; icon-glyph: smile;
 // ==========================================
 // DUAL MOOD HOME SCREEN WIDGET
@@ -96,6 +93,10 @@ try {
 
     for (let r of reminders) {
       let title = r.title || "";
+
+      // Skip avatar storage reminders (they hold base64 image data, not moods)
+      if (title.toLowerCase().includes("avatar")) continue;
+
       let match = title.match(/^\[(.*?)\]\s*(.*)$/);
 
       let user = match ? match[1].trim() : "";
@@ -186,107 +187,218 @@ function addLiveTime(stack, date, size, hex, prefix) {
   t.lineLimit = 1;
 }
 
-// ---- Build widget ----
-let widget = new ListWidget();
-widget.backgroundColor = new Color("#0B0C10");
-widget.setPadding(14, 16, 14, 16);
-
-// Tapping the widget opens and runs the dashboard script
-widget.url = "scriptable:///run/" + encodeURIComponent(dashboardScriptName);
-
-let headerStack = widget.addStack();
-headerStack.layoutHorizontally();
-
-let headerTitle = headerStack.addText("MOOD DASHBOARD");
-headerTitle.font = Font.boldSystemFont(10);
-headerTitle.textColor = new Color("#818CF8");
-
-headerStack.addSpacer();
-
-let ranLabel = headerStack.addText("↻ " + ranAt);
-ranLabel.font = Font.systemFont(8);
-ranLabel.textColor = new Color("#6B7280");
-
-widget.addSpacer(8);
-
-let partnerCard = widget.addStack();
-partnerCard.layoutVertically();
-partnerCard.backgroundColor = new Color("#1E1F29");
-partnerCard.cornerRadius = 14;
-partnerCard.setPadding(10, 12, 10, 12);
-
-let pRow1 = partnerCard.addStack();
-pRow1.layoutHorizontally();
-pRow1.centerAlignContent();
-
-let pNameLabel = pRow1.addText(partnerUserName.toUpperCase());
-pNameLabel.font = Font.boldSystemFont(10);
-pNameLabel.textColor = new Color("#F472B6");
-
-pRow1.addSpacer();
-
-let pDots = pRow1.addText(pEnergyDots);
-pDots.font = Font.boldSystemFont(9);
-pDots.textColor = new Color("#00E5FF");
-
-partnerCard.addSpacer(3);
-
-let pStatus = partnerCard.addText(pStatusText);
-pStatus.font = Font.boldSystemFont(14);
-pStatus.textColor = Color.white();
-pStatus.lineLimit = 1;
-
-if (pNoteText) {
-  partnerCard.addSpacer(2);
-  let pNote = partnerCard.addText(`"${pNoteText}"`);
-  pNote.font = Font.italicSystemFont(10);
-  pNote.textColor = new Color("#D1D5DB");
-  pNote.lineLimit = 1;
+// ---- Widget builders ----
+function newBaseWidget() {
+  let w = new ListWidget();
+  w.backgroundColor = new Color("#0B0C10");
+  // Tapping the widget opens and runs the dashboard script
+  w.url = "scriptable:///run/" + encodeURIComponent(dashboardScriptName);
+  return w;
 }
 
-partnerCard.addSpacer(2);
+// SMALL (~158pt square): partner mood is the hero, "you" is one compact line
+function buildSmallWidget() {
+  let widget = newBaseWidget();
+  widget.setPadding(12, 12, 12, 12);
 
-let pTimeRow = partnerCard.addStack();
-pTimeRow.layoutHorizontally();
-addLiveTime(
-  pTimeRow,
-  partnerLatest ? partnerLatest.date : null,
-  8,
-  "#9CA3AF",
-  "Updated ",
-);
+  let topRow = widget.addStack();
+  topRow.layoutHorizontally();
+  topRow.centerAlignContent();
 
-widget.addSpacer(8);
+  let name = topRow.addText(partnerUserName.toUpperCase());
+  name.font = Font.boldSystemFont(9);
+  name.textColor = new Color("#F472B6");
+  name.lineLimit = 1;
+  name.minimumScaleFactor = 0.7;
 
-let myCard = widget.addStack();
-myCard.layoutHorizontally();
-myCard.centerAlignContent();
-myCard.backgroundColor = new Color("#171821");
-myCard.cornerRadius = 10;
-myCard.setPadding(8, 10, 8, 10);
+  topRow.addSpacer();
 
-let myTag = myCard.addText("YOU");
-myTag.font = Font.boldSystemFont(9);
-myTag.textColor = new Color("#818CF8");
+  let dots = topRow.addText(pEnergyDots);
+  dots.font = Font.boldSystemFont(8);
+  dots.textColor = new Color("#00E5FF");
 
-myCard.addSpacer(8);
+  widget.addSpacer(6);
 
-let myMood = myCard.addText(myStatusText);
-myMood.font = Font.semiboldSystemFont(11);
-myMood.textColor = Color.white();
-myMood.lineLimit = 1;
+  let status = widget.addText(pStatusText);
+  status.font = Font.boldSystemFont(15);
+  status.textColor = Color.white();
+  status.lineLimit = 2;
+  status.minimumScaleFactor = 0.8;
 
-myCard.addSpacer();
+  if (pNoteText) {
+    widget.addSpacer(3);
+    let note = widget.addText(`"${pNoteText}"`);
+    note.font = Font.italicSystemFont(10);
+    note.textColor = new Color("#D1D5DB");
+    note.lineLimit = 2;
+    note.minimumScaleFactor = 0.85;
+  }
 
-let myTimeRow = myCard.addStack();
-myTimeRow.layoutHorizontally();
-addLiveTime(myTimeRow, myLatest ? myLatest.date : null, 8, "#6B7280", "");
+  widget.addSpacer();
+
+  let youRow = widget.addStack();
+  youRow.layoutHorizontally();
+  youRow.centerAlignContent();
+
+  let youTag = youRow.addText("YOU");
+  youTag.font = Font.boldSystemFont(8);
+  youTag.textColor = new Color("#818CF8");
+
+  youRow.addSpacer(5);
+
+  let youMood = youRow.addText(myStatusText);
+  youMood.font = Font.semiboldSystemFont(10);
+  youMood.textColor = Color.white();
+  youMood.lineLimit = 1;
+  youMood.minimumScaleFactor = 0.7;
+
+  widget.addSpacer(3);
+
+  let timeRow = widget.addStack();
+  timeRow.layoutHorizontally();
+  addLiveTime(
+    timeRow,
+    partnerLatest ? partnerLatest.date : null,
+    8,
+    "#9CA3AF",
+    "Updated ",
+  );
+
+  return widget;
+}
+
+// MEDIUM (and LARGE, which reuses it and pins content to the top)
+function buildMediumWidget(isLarge) {
+  let widget = newBaseWidget();
+  widget.setPadding(14, 16, 14, 16);
+
+  let headerStack = widget.addStack();
+  headerStack.layoutHorizontally();
+
+  let headerTitle = headerStack.addText("MOOD DASHBOARD");
+  headerTitle.font = Font.boldSystemFont(10);
+  headerTitle.textColor = new Color("#818CF8");
+
+  headerStack.addSpacer();
+
+  let ranLabel = headerStack.addText("↻ " + ranAt);
+  ranLabel.font = Font.systemFont(8);
+  ranLabel.textColor = new Color("#6B7280");
+
+  widget.addSpacer(8);
+
+  let partnerCard = widget.addStack();
+  partnerCard.layoutVertically();
+  partnerCard.backgroundColor = new Color("#1E1F29");
+  partnerCard.cornerRadius = 14;
+  partnerCard.setPadding(10, 12, 10, 12);
+
+  let pRow1 = partnerCard.addStack();
+  pRow1.layoutHorizontally();
+  pRow1.centerAlignContent();
+
+  let pNameLabel = pRow1.addText(partnerUserName.toUpperCase());
+  pNameLabel.font = Font.boldSystemFont(10);
+  pNameLabel.textColor = new Color("#F472B6");
+
+  pRow1.addSpacer();
+
+  let pDots = pRow1.addText(pEnergyDots);
+  pDots.font = Font.boldSystemFont(9);
+  pDots.textColor = new Color("#00E5FF");
+
+  partnerCard.addSpacer(3);
+
+  let pStatus = partnerCard.addText(pStatusText);
+  pStatus.font = Font.boldSystemFont(14);
+  pStatus.textColor = Color.white();
+  pStatus.lineLimit = 1;
+
+  if (pNoteText) {
+    partnerCard.addSpacer(2);
+    let pNote = partnerCard.addText(`"${pNoteText}"`);
+    pNote.font = Font.italicSystemFont(10);
+    pNote.textColor = new Color("#D1D5DB");
+    pNote.lineLimit = 1;
+  }
+
+  partnerCard.addSpacer(2);
+
+  let pTimeRow = partnerCard.addStack();
+  pTimeRow.layoutHorizontally();
+  addLiveTime(
+    pTimeRow,
+    partnerLatest ? partnerLatest.date : null,
+    8,
+    "#9CA3AF",
+    "Updated ",
+  );
+
+  widget.addSpacer(8);
+
+  let myCard = widget.addStack();
+  myCard.layoutHorizontally();
+  myCard.centerAlignContent();
+  myCard.backgroundColor = new Color("#171821");
+  myCard.cornerRadius = 10;
+  myCard.setPadding(8, 10, 8, 10);
+
+  let myTag = myCard.addText("YOU");
+  myTag.font = Font.boldSystemFont(9);
+  myTag.textColor = new Color("#818CF8");
+
+  myCard.addSpacer(8);
+
+  let myMood = myCard.addText(myStatusText);
+  myMood.font = Font.semiboldSystemFont(11);
+  myMood.textColor = Color.white();
+  myMood.lineLimit = 1;
+
+  myCard.addSpacer();
+
+  let myTimeRow = myCard.addStack();
+  myTimeRow.layoutHorizontally();
+  addLiveTime(myTimeRow, myLatest ? myLatest.date : null, 8, "#6B7280", "");
+
+  if (isLarge) widget.addSpacer();
+
+  return widget;
+}
+
+// ---- Pick size: real family in a widget, a chooser when run in the app ----
+let family = "medium";
+let cancelled = false;
 
 if (config.runsInWidget) {
-  widget.refreshAfterDate = new Date(Date.now() + 5 * 60 * 1000);
-  Script.setWidget(widget);
+  family = config.widgetFamily || "medium";
 } else {
-  await widget.presentMedium();
+  let sizeAlert = new Alert();
+  sizeAlert.title = "Preview size";
+  sizeAlert.addAction("Small");
+  sizeAlert.addAction("Medium");
+  sizeAlert.addAction("Large");
+  sizeAlert.addCancelAction("Cancel");
+  let choice = await sizeAlert.presentSheet();
+  if (choice === -1) cancelled = true;
+  family = ["small", "medium", "large"][choice] || "medium";
+}
+
+if (!cancelled) {
+  let widget =
+    family === "small"
+      ? buildSmallWidget()
+      : buildMediumWidget(family === "large");
+
+  if (config.runsInWidget) {
+    widget.refreshAfterDate = new Date(Date.now() + 5 * 60 * 1000);
+    Script.setWidget(widget);
+  } else if (family === "small") {
+    await widget.presentSmall();
+  } else if (family === "large") {
+    await widget.presentLarge();
+  } else {
+    await widget.presentMedium();
+  }
 }
 
 Script.complete();
