@@ -1,27 +1,37 @@
 // Variables used by Scriptable.
 // These must be at the very top of the file. Do not edit.
 // icon-color: purple; icon-glyph: chart-line;
+// Variables used by Scriptable.
+// These must be at the very top of the file. Do not edit.
+// icon-color: purple; icon-glyph: chart-line;
 // ==========================================
 // MOOD DASHBOARD (REDESIGNED LAYOUT & SAFE AVATAR SYNC)
 // ==========================================
 
-const fm = FileManager.local();
+let fm = FileManager.iCloud();
+try {
+  fm.documentsDirectory();
+} catch (e) {
+  fm = FileManager.local();
+}
+
 const userConfigPath = fm.joinPath(fm.documentsDirectory(), "user_config.json");
 
 let myUserName = "You";
 let partnerUserName = "Partner";
+let listName = "Mood Dashboard";
 
 if (fm.fileExists(userConfigPath)) {
   try {
     let config = JSON.parse(fm.readString(userConfigPath));
     myUserName = (config.myUserName || "You").trim();
     partnerUserName = (config.partnerUserName || "Partner").trim();
+    listName = (config.listName || "Mood Dashboard").trim();
   } catch (e) {
     console.log("Could not read user_config.json, using defaults.");
   }
 }
 
-const listName = "Mood Dashboard";
 const configPath = fm.joinPath(fm.documentsDirectory(), "mood_presets.json");
 
 const defaults = [

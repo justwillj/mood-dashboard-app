@@ -1,8 +1,11 @@
 // Variables used by Scriptable.
 // These must be at the very top of the file. Do not edit.
 // icon-color: deep-blue; icon-glyph: magic;
+// Variables used by Scriptable.
+// These must be at the very top of the file. Do not edit.
+// icon-color: deep-blue; icon-glyph: magic;
 // ==========================================
-// GITHUB SYNC (FIXED ITEM ITERATION)
+// GITHUB SYNC (FIXED ITEM ITERATION & SETUP)
 // ==========================================
 
 const githubUser = "justwillj";
@@ -18,12 +21,13 @@ try {
 }
 
 const userConfigPath = fm.joinPath(fm.documentsDirectory(), "user_config.json");
+const circlesPath = fm.joinPath(fm.documentsDirectory(), "mood_circles.json");
 
 async function runSync() {
   if (!fm.fileExists(userConfigPath)) {
     let success = await promptForNames(
       "Mood Dashboard Setup",
-      "Enter dashboard names:",
+      "Enter your names and the shared Reminders list name below:",
     );
     if (!success) return;
   } else {
@@ -31,13 +35,16 @@ async function runSync() {
     menuAlert.title = "Dashboard Manager";
     menuAlert.message = "Choose an action:";
     menuAlert.addAction("🔄 Sync Scripts from GitHub");
-    menuAlert.addAction("✏️ Change Dashboard Names");
+    menuAlert.addAction("✏️ Change Setup (Names & List)");
     menuAlert.addCancelAction("Cancel");
 
     let choice = await menuAlert.presentAlert();
     if (choice === -1) return;
     if (choice === 1) {
-      let success = await promptForNames("Update Names", "Update names below:");
+      let success = await promptForNames(
+        "Update Setup",
+        "Update your names and list below:",
+      );
       if (!success) return;
     }
   }
@@ -117,21 +124,26 @@ async function runSync() {
 }
 
 async function promptForNames(title, message) {
-  let existingMyName = "You";
-  let existingPartnerName = "Partner";
+  let existingMyName = "";
+  let existingPartnerName = "";
+  let existingListName = "Mood Dashboard";
+
   if (fm.fileExists(userConfigPath)) {
     try {
       let cfg = JSON.parse(fm.readString(userConfigPath));
-      existingMyName = cfg.myUserName || "You";
-      existingPartnerName = cfg.partnerUserName || "Partner";
+      existingMyName = cfg.myUserName === "You" ? "" : cfg.myUserName || "";
+      existingPartnerName =
+        cfg.partnerUserName === "Partner" ? "" : cfg.partnerUserName || "";
+      existingListName = cfg.listName || "Mood Dashboard";
     } catch (e) {}
   }
 
   let setupAlert = new Alert();
   setupAlert.title = title;
   setupAlert.message = message;
-  setupAlert.addTextField("Your Name", existingMyName);
-  setupAlert.addTextField("Partner Name", existingPartnerName);
+  setupAlert.addTextField("Your Name (e.g. Dylan)", existingMyName);
+  setupAlert.addTextField("Partner Name (e.g. Will)", existingPartnerName);
+  setupAlert.addTextField("Shared List Name", existingListName);
   setupAlert.addAction("Save");
   setupAlert.addCancelAction("Cancel");
 
@@ -140,12 +152,35 @@ async function promptForNames(title, message) {
 
   let myName = setupAlert.textFieldValue(0).trim() || "You";
   let partnerName = setupAlert.textFieldValue(1).trim() || "Partner";
+  let lstName = setupAlert.textFieldValue(2).trim() || "Mood Dashboard";
 
   let configData = {
     myUserName: myName,
     partnerUserName: partnerName,
+    listName: lstName,
   };
   fm.writeString(userConfigPath, JSON.stringify(configData, null, 2));
+
+  let circlesData = { circles: [], active: 0 };
+  if (fm.fileExists(circlesPath)) {
+    try {
+      circlesData = JSON.parse(fm.readString(circlesPath));
+    } catch (e) {}
+  }
+
+  if (!circlesData.circles || circlesData.circles.length === 0) {
+    circlesData.circles = [
+      { partner: partnerName, list: lstName, autoShare: true },
+    ];
+  } else {
+    let idx = circlesData.active || 0;
+    if (circlesData.circles[idx]) {
+      circlesData.circles[idx].partner = partnerName;
+      circlesData.circles[idx].list = lstName;
+    }
+  }
+  fm.writeString(circlesPath, JSON.stringify(circlesData, null, 2));
+
   return true;
 }
 

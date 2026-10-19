@@ -1,6 +1,9 @@
 // Variables used by Scriptable.
 // These must be at the very top of the file. Do not edit.
 // icon-color: pink; icon-glyph: smile;
+// Variables used by Scriptable.
+// These must be at the very top of the file. Do not edit.
+// icon-color: pink; icon-glyph: smile;
 // ==========================================
 // DUAL MOOD HOME SCREEN WIDGET
 // ==========================================
@@ -8,24 +11,30 @@
 // Must match the dashboard script's name in Scriptable EXACTLY (case and spaces)
 const dashboardScriptName = "mood-dashboard";
 
-const fm = FileManager.local();
+let fm = FileManager.iCloud();
+try {
+  fm.documentsDirectory();
+} catch (e) {
+  fm = FileManager.local();
+}
+
 const userConfigPath = fm.joinPath(fm.documentsDirectory(), "user_config.json");
 let cachePath = fm.joinPath(fm.documentsDirectory(), "mood_widget_cache.json");
 
 let myUserName = "You";
 let partnerUserName = "Partner";
+let listName = "Mood Dashboard";
 
 if (fm.fileExists(userConfigPath)) {
   try {
     let userConfig = JSON.parse(fm.readString(userConfigPath));
     myUserName = (userConfig.myUserName || "You").trim();
     partnerUserName = (userConfig.partnerUserName || "Partner").trim();
+    listName = (userConfig.listName || "Mood Dashboard").trim();
   } catch (e) {
     console.log("Could not read user_config.json, using defaults.");
   }
 }
-
-let listName = "Mood Dashboard";
 
 // ---- Which friend? A widget parameter (a friend's name) wins, else the friend chosen in the dashboard ----
 const circlesPath = fm.joinPath(fm.documentsDirectory(), "mood_circles.json");
