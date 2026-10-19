@@ -22,7 +22,40 @@ if (fm.fileExists(userConfigPath)) {
   }
 }
 
-const listName = "Mood Dashboard";
+let listName = "Mood Dashboard";
+
+// ---- Which friend? A widget parameter (a friend's name) wins, else the friend chosen in the dashboard ----
+const circlesPath = fm.joinPath(fm.documentsDirectory(), "mood_circles.json");
+if (fm.fileExists(circlesPath)) {
+  try {
+    let saved = JSON.parse(fm.readString(circlesPath));
+    let friends = (Array.isArray(saved.circles) ? saved.circles : []).filter(
+      (c) =>
+        c &&
+        typeof c.partner === "string" &&
+        typeof c.list === "string" &&
+        c.partner.trim() &&
+        c.list.trim(),
+    );
+    if (friends.length) {
+      let want = String(args.widgetParameter || "")
+        .trim()
+        .toLowerCase();
+      let idx = Math.max(
+        0,
+        Math.min(friends.length - 1, parseInt(saved.active, 10) || 0),
+      );
+      let pick =
+        (want &&
+          friends.find((c) => c.partner.trim().toLowerCase() === want)) ||
+        friends[idx];
+      partnerUserName = pick.partner.trim();
+      listName = pick.list.trim();
+    }
+  } catch (e) {
+    console.log("Could not read mood_circles.json, using defaults.");
+  }
+}
 const presetsPath = fm.joinPath(fm.documentsDirectory(), "mood_presets.json");
 let moodPresets = [];
 
@@ -50,6 +83,71 @@ if (moodPresets.length === 0) {
 }
 
 // 5-Level Dot Energy Indicator
+// ---- Conventions stored in the shared Reminders list (must match the dashboard) ----
+const NO_REPLY_MARK = "🔕 No reply needed"; // last line of a check-in's notes
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+// Reminders that store data (avatars, "Helps: <Name>" cards) rather than a mood check-in
+function isDataTitle(title) {
+  let t = String(title || "")
+    .toLowerCase()
+    .trim();
+  return t.includes("avatar") || t.startsWith("helps:");
+}
+
+function isRestingMood(mood) {
+  return String(mood || "")
+    .trim()
+    .toLowerCase()
+    .startsWith("🌙 resting");
+}
+
+// Capacity line "📊 Energy 3/5 · Social 2/5 · Sensory 4/5 · Talk: text" (must match the dashboard)
+const CAP_MARK = "📊";
+
+function parseCapLine(line) {
+  let cap = {};
+  String(line)
+    .replace(CAP_MARK, "")
+    .split("·")
+    .forEach((part) => {
+      let p = part.trim();
+      let m = p.match(/^(Energy|Social|Sensory)\s+([1-5])\/5$/i);
+      if (m) {
+        cap[m[1].toLowerCase()] = parseInt(m[2], 10);
+        return;
+      }
+      let t = p.match(/^Talk:\s*(ok|text|none)$/i);
+      if (t) cap.talk = t[1].toLowerCase();
+    });
+  return cap;
+}
+
+// Splits notes into the visible note, capacity values and the "no reply needed" flag
+function splitNotes(raw) {
+  let keep = [];
+  let noReply = false;
+  let cap = {};
+  String(raw || "")
+    .split("\n")
+    .forEach((line) => {
+      let l = line.trim();
+      if (l === NO_REPLY_MARK) noReply = true;
+      else if (l.startsWith(CAP_MARK)) cap = parseCapLine(l);
+      else if (l) keep.push(l);
+    });
+  return { text: keep.join(" "), noReply: noReply, cap: cap };
+}
+
+// Tiny capacity summary for tight spaces: "🔋2 🔊4 💬"
+function capCompact(cap) {
+  let parts = [];
+  if (cap.social != null) parts.push("🔋" + cap.social);
+  if (cap.sensory != null) parts.push("🔊" + cap.sensory);
+  if (cap.talk) parts.push({ ok: "🗣️", text: "💬", none: "🔇" }[cap.talk]);
+  return parts.join(" ");
+}
+
 function getEnergyIcon(level) {
   let validLevel = Math.max(1, Math.min(5, level || 3));
   return "●".repeat(validLevel) + "○".repeat(5 - validLevel);
@@ -81,7 +179,9 @@ function formatRelativeTime(date) {
 
 const cachePath = fm.joinPath(
   fm.documentsDirectory(),
-  "mood_lockscreen_cache.json",
+  "mood_lockscreen_cache_" +
+    partnerUserName.toLowerCase().replace(/[^a-z0-9]+/g, "_") +
+    ".json",
 );
 
 // ---- Fetch latest partner mood (with cache fallback) ----
@@ -106,8 +206,8 @@ try {
     for (let r of reminders) {
       let title = r.title || "";
 
-      // Skip avatar storage reminders (they hold base64 image data, not moods)
-      if (title.toLowerCase().includes("avatar")) continue;
+      // Skip data reminders (avatars, help cards): they are not mood check-ins
+      if (isDataTitle(title)) continue;
 
       let match = title.match(/^\[(.*?)\]\s*(.*)$/);
 
@@ -147,7 +247,12 @@ if (!fetchOk && fm.fileExists(cachePath)) {
 }
 
 let partnerStatusText = partnerLatest ? partnerLatest.mood : "No Check-in";
-let partnerNoteText = partnerLatest ? partnerLatest.note : "";
+let pSplit = splitNotes(partnerLatest ? partnerLatest.note : "");
+let pResting = partnerLatest ? isRestingMood(partnerLatest.mood) : false;
+// 🔕 prefix = "no reply needed"; resting with no note says so
+let partnerNoteText = pSplit.noReply
+  ? "🔕 " + (pSplit.text || "No reply needed")
+  : pSplit.text || (pResting ? "No check-ins needed" : "");
 
 let matchedPreset = partnerLatest
   ? moodPresets.find((p) =>
@@ -155,7 +260,7 @@ let matchedPreset = partnerLatest
     )
   : null;
 let energyLevel = matchedPreset ? matchedPreset.energy : 3;
-let energyIconString = getEnergyIcon(energyLevel);
+let energyIconString = pResting ? "" : getEnergyIcon(energyLevel);
 
 let displayStatusText = replaceCirclesWithFaces(partnerStatusText);
 
@@ -176,7 +281,11 @@ function getFaceToken(text) {
 function newLockWidget() {
   let w = new ListWidget();
   // Tapping the widget opens and runs the dashboard script
-  w.url = "scriptable:///run/" + encodeURIComponent(dashboardScriptName);
+  w.url =
+    "scriptable:///run/" +
+    encodeURIComponent(dashboardScriptName) +
+    "?friend=" +
+    encodeURIComponent(partnerUserName);
   return w;
 }
 
@@ -239,7 +348,8 @@ function buildRectangular() {
 
   timeRow.addSpacer();
 
-  let ranText = timeRow.addText("↻ " + ranAt);
+  // Capacity (🔋 social, 🔊 sensory, talking) takes the place of the refresh time when set
+  let ranText = timeRow.addText(capCompact(pSplit.cap) || "↻ " + ranAt);
   ranText.font = Font.systemFont(8);
   ranText.textColor = new Color("#FFFFFF", 0.4);
   ranText.lineLimit = 1;

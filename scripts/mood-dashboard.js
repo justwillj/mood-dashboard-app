@@ -81,9 +81,85 @@ if (fm.fileExists(settingsPath)) {
 }
 
 let calendars = await Calendar.forReminders();
-let cal = calendars.find(
-  (c) => c.title.toLowerCase() === listName.toLowerCase(),
-);
+
+function findCalendar(name) {
+  let n = String(name || "")
+    .trim()
+    .toLowerCase();
+  return calendars.find((c) => c.title.trim().toLowerCase() === n) || null;
+}
+
+// ---- Friends ("circles"): each friend has their OWN shared Reminders list ----
+const circlesPath = fm.joinPath(fm.documentsDirectory(), "mood_circles.json");
+let circles = [];
+let activeCircle = 0;
+
+function cleanCircle(c) {
+  if (!c || typeof c.partner !== "string" || typeof c.list !== "string")
+    return null;
+  let partner = c.partner.trim().slice(0, 40);
+  let list = c.list.trim().slice(0, 80);
+  if (!partner || !list) return null;
+  return { partner: partner, list: list, autoShare: c.autoShare !== false };
+}
+
+function loadCircles() {
+  let list = [];
+  let active = 0;
+  if (fm.fileExists(circlesPath)) {
+    try {
+      let saved = JSON.parse(fm.readString(circlesPath));
+      let seen = {};
+      (Array.isArray(saved.circles) ? saved.circles : []).forEach((c) => {
+        let cc = cleanCircle(c);
+        if (cc && !seen[cc.partner.toLowerCase()]) {
+          seen[cc.partner.toLowerCase()] = true;
+          list.push(cc);
+        }
+      });
+      active = clampInt(saved.active, 0, Math.max(0, list.length - 1), 0);
+    } catch (e) {
+      console.log("Could not read mood_circles.json, using defaults.");
+    }
+  }
+  // First run (or unreadable file): one friend, from user_config.json
+  if (!list.length)
+    list = [{ partner: partnerUserName, list: listName, autoShare: true }];
+  circles = list;
+  activeCircle = active;
+}
+
+function saveCircles() {
+  fm.writeString(
+    circlesPath,
+    JSON.stringify({ circles: circles, active: activeCircle }, null, 2),
+  );
+}
+
+let cal = null;
+// Points the whole dashboard at the active friend's list and name
+function applyActiveCircle() {
+  partnerUserName = circles[activeCircle].partner;
+  cal = findCalendar(circles[activeCircle].list);
+}
+
+loadCircles();
+applyActiveCircle();
+
+// Widgets open the dashboard with ?friend=<Name> so it lands on the same friend
+{
+  let fq = args.queryParameters && args.queryParameters.friend;
+  if (fq) {
+    let i = circles.findIndex(
+      (c) => c.partner.toLowerCase() === String(fq).trim().toLowerCase(),
+    );
+    if (i !== -1 && i !== activeCircle) {
+      activeCircle = i;
+      applyActiveCircle();
+      saveCircles();
+    }
+  }
+}
 // NOTE: no fallback to the default Reminders list. If the list is missing,
 // the script stops with a message instead (see bottom of file).
 
@@ -130,17 +206,22 @@ async function changeMyAvatar() {
     let jpegData = Data.fromJPEG(processedImg);
     let base64String = "data:image/jpeg;base64," + jpegData.toBase64String();
 
-    let allReminders = await Reminder.all([cal]);
-    let myAvatarReminder = allReminders.find((r) => isAvatarFor(r, myUserName));
+    // Saved into every shared list that has sharing switched on
+    for (let k of shareCalendars()) {
+      let allReminders = await Reminder.all([k]);
+      let myAvatarReminder = allReminders.find((r) =>
+        isAvatarFor(r, myUserName),
+      );
 
-    if (!myAvatarReminder) {
-      myAvatarReminder = new Reminder();
-      myAvatarReminder.title = myUserName + " Avatar";
-      myAvatarReminder.calendar = cal;
+      if (!myAvatarReminder) {
+        myAvatarReminder = new Reminder();
+        myAvatarReminder.title = myUserName + " Avatar";
+        myAvatarReminder.calendar = k;
+      }
+
+      myAvatarReminder.notes = base64String;
+      await myAvatarReminder.save();
     }
-
-    myAvatarReminder.notes = base64String;
-    await myAvatarReminder.save();
   } catch (e) {
     console.log("Photo selection cancelled or failed: " + e);
   }
@@ -192,6 +273,290 @@ function parseMood(title) {
   return { user: "Unknown", mood: title };
 }
 
+// ---- Conventions stored in the shared Reminders list ----
+// Last line of a check-in's notes when "no reply needed" is switched on
+const NO_REPLY_MARK = "🔕 No reply needed";
+// Built-in "no check-ins needed" mood (works on both phones, no preset required)
+const REST_TITLE = "🌙 Resting";
+// A "Helps: <Name>" reminder holds that person's "what helps" cards as JSON in its notes
+const HELPS_PREFIX = "Helps: ";
+
+// Reminders that store data (avatars, help cards) rather than a mood check-in
+function isDataTitle(title) {
+  let t = String(title || "")
+    .toLowerCase()
+    .trim();
+  return (
+    t.includes("avatar") || t.startsWith("helps:") || t.startsWith("love:")
+  );
+}
+
+function isRestingMood(mood) {
+  return String(mood || "")
+    .trim()
+    .toLowerCase()
+    .startsWith("🌙 resting");
+}
+
+// ---- Capacity line: "📊 Energy 3/5 · Social 2/5 · Sensory 4/5 · Talk: text" ----
+// Stored on its own line in a check-in's notes. Energy is written with every check-in so
+// trends stay accurate even for moods that aren't in the other phone's preset list.
+const CAP_MARK = "📊";
+
+function parseCapLine(line) {
+  let cap = {};
+  String(line)
+    .replace(CAP_MARK, "")
+    .split("·")
+    .forEach((part) => {
+      let p = part.trim();
+      let m = p.match(/^(Energy|Social|Sensory)\s+([1-5])\/5$/i);
+      if (m) {
+        cap[m[1].toLowerCase()] = parseInt(m[2], 10);
+        return;
+      }
+      let t = p.match(/^Talk:\s*(ok|text|none)$/i);
+      if (t) cap.talk = t[1].toLowerCase();
+    });
+  return cap;
+}
+
+function formatCapLine(cap) {
+  if (!cap) return "";
+  let parts = [];
+  if (cap.energy != null) parts.push("Energy " + cap.energy + "/5");
+  if (cap.social != null) parts.push("Social " + cap.social + "/5");
+  if (cap.sensory != null) parts.push("Sensory " + cap.sensory + "/5");
+  if (cap.talk) parts.push("Talk: " + cap.talk);
+  return parts.length ? CAP_MARK + " " + parts.join(" · ") : "";
+}
+
+// Splits a reminder's notes into the visible note, the capacity values and the "no reply needed" flag
+function splitNotes(raw) {
+  let keep = [];
+  let noReply = false;
+  let cap = {};
+  String(raw || "")
+    .split("\n")
+    .forEach((line) => {
+      let l = line.trim();
+      if (l === NO_REPLY_MARK) noReply = true;
+      else if (l.startsWith(CAP_MARK)) cap = parseCapLine(l);
+      else if (l) keep.push(l);
+    });
+  return { text: keep.join(" "), noReply: noReply, cap: cap };
+}
+
+// Builds notes text: note, then the capacity line, then the "no reply needed" marker
+function buildNotes(text, noReply, cap) {
+  let clean = String(text || "")
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l && l !== NO_REPLY_MARK && !l.startsWith(CAP_MARK))
+    .join(" ");
+  let lines = [];
+  if (clean) lines.push(clean);
+  let capLine = formatCapLine(cap);
+  if (capLine) lines.push(capLine);
+  if (noReply) lines.push(NO_REPLY_MARK);
+  return lines.join("\n");
+}
+
+// social / sensory / talk from "?soc=2&sen=4&talk=text" style values
+function capFromQuery(q) {
+  let cap = {};
+  let soc = parseInt(q.soc, 10);
+  let sen = parseInt(q.sen, 10);
+  if (soc >= 1 && soc <= 5) cap.social = soc;
+  if (sen >= 1 && sen <= 5) cap.sensory = sen;
+  if (["ok", "text", "none"].indexOf(q.talk) !== -1) cap.talk = q.talk;
+  return cap;
+}
+
+// Energy (1-5) of one of MY presets by exact title; null for Resting / unknown
+function energyOfTitle(title) {
+  if (isRestingMood(title)) return null;
+  let key = String(title || "")
+    .trim()
+    .toLowerCase();
+  let p = moods.find((m) => String(m.title).trim().toLowerCase() === key);
+  return p && p.energy != null ? Math.max(1, Math.min(5, p.energy)) : null;
+}
+
+function capChipsHtml(cap) {
+  if (!cap) return "";
+  let chips = [];
+  let talkWords = {
+    ok: "🗣️ Okay to talk",
+    text: "💬 Text only",
+    none: "🔇 No talking",
+  };
+  if (cap.social != null)
+    chips.push(
+      '<span class="cap-chip' +
+        (cap.social <= 2 ? " warn" : "") +
+        '">🔋 Social ' +
+        cap.social +
+        "/5</span>",
+    );
+  if (cap.sensory != null)
+    chips.push(
+      '<span class="cap-chip' +
+        (cap.sensory >= 4 ? " warn" : "") +
+        '">🔊 Sensory ' +
+        cap.sensory +
+        "/5</span>",
+    );
+  if (cap.talk)
+    chips.push(
+      '<span class="cap-chip' +
+        (cap.talk === "none" ? " warn" : "") +
+        '">' +
+        talkWords[cap.talk] +
+        "</span>",
+    );
+  return chips.length
+    ? '<div class="cap-chips">' + chips.join("") + "</div>"
+    : "";
+}
+
+// ---- Trends (per day, from check-ins) ----
+const LOW_ENERGY = 2; // a day averaging 2 or below counts as a low-energy day
+
+function dayKey(d) {
+  return d.getFullYear() + "-" + d.getMonth() + "-" + d.getDate();
+}
+function avgOf(a) {
+  return a.length ? a.reduce((x, y) => x + y, 0) / a.length : null;
+}
+function round1(n) {
+  return n == null ? null : Math.round(n * 10) / 10;
+}
+
+// One entry per check-in by this person: { t, energy, resting, social, sensory, talk }
+function collectEntries(list, userName) {
+  let out = [];
+  for (let r of list) {
+    if (isDataTitle(r.title) || !r.creationDate) continue;
+    let p = parseMood(r.title || "");
+    if (p.user.toLowerCase() !== userName.toLowerCase()) continue;
+    let ns = splitNotes(r.notes);
+    let resting = isRestingMood(p.mood);
+    let energy = null;
+    if (!resting)
+      energy = ns.cap.energy != null ? ns.cap.energy : energyFor(p.mood);
+    out.push({
+      t: new Date(r.creationDate).getTime(),
+      energy: energy,
+      resting: resting,
+      social: ns.cap.social != null ? ns.cap.social : null,
+      sensory: ns.cap.sensory != null ? ns.cap.sensory : null,
+      talk: ns.cap.talk || null,
+    });
+  }
+  return out;
+}
+
+// Daily summary for the last R days, the R days before that, and a "low lately" alert (last 7 days)
+function summarizeTrend(entries, R) {
+  let groups = {};
+  entries.forEach((e) => {
+    let k = dayKey(new Date(e.t));
+    (groups[k] = groups[k] || []).push(e);
+  });
+  let today = new Date();
+  today.setHours(0, 0, 0, 0);
+
+  function dayInfo(offset) {
+    let d = new Date(today);
+    d.setDate(d.getDate() - offset);
+    let g = groups[dayKey(d)] || [];
+    let es = g.filter((e) => e.energy != null).map((e) => e.energy);
+    return {
+      l: MONTHS[d.getMonth()].slice(0, 3) + " " + d.getDate(),
+      c: g.length,
+      e: es.length ? round1(avgOf(es)) : null,
+      r: g.some((e) => e.resting) ? 1 : 0,
+      soc: g.filter((e) => e.social != null).map((e) => e.social),
+      sen: g.filter((e) => e.sensory != null).map((e) => e.sensory),
+      cant: g.some((e) => e.talk === "none") ? 1 : 0,
+    };
+  }
+  let days = [];
+  for (let i = R - 1; i >= 0; i--) days.push(dayInfo(i));
+  let prev = [];
+  for (let i = 2 * R - 1; i >= R; i--) prev.push(dayInfo(i));
+  let last7 = [];
+  for (let i = 6; i >= 0; i--) last7.push(dayInfo(i));
+
+  let lowOf = (a) => a.filter((x) => x.e != null && x.e <= LOW_ENERGY).length;
+  let withE = (a) => a.filter((x) => x.e != null);
+  let flat = (a, k) => a.reduce((acc, x) => acc.concat(x[k]), []);
+
+  let low7 = lowOf(last7);
+  let withE7 = withE(last7).length;
+  // Alert: low on 3+ of the last 7 days AND on at least 60% of the days that have an energy reading
+  let alert =
+    low7 >= 3 && withE7 > 0 && low7 >= 0.6 * withE7
+      ? { low: low7, days: 7 }
+      : null;
+
+  let socAll = flat(days, "soc");
+  let senAll = flat(days, "sen");
+  let prevE = withE(prev);
+  return {
+    days: days.map((x) => ({ l: x.l, c: x.c, e: x.e, r: x.r })),
+    stats: {
+      checkin: days.filter((x) => x.c > 0).length,
+      total: R,
+      avg: round1(avgOf(withE(days).map((x) => x.e))),
+      prev: prevE.length ? round1(avgOf(prevE.map((x) => x.e))) : null,
+      low: lowOf(days),
+      withE: withE(days).length,
+      rest: days.filter((x) => x.r).length,
+      soc: round1(avgOf(socAll)),
+      socN: socAll.length,
+      sen: round1(avgOf(senAll)),
+      senN: senAll.length,
+      cant: days.filter((x) => x.cant).length,
+    },
+    alert: alert,
+  };
+}
+
+function isHelpsFor(reminder, name) {
+  let t = ((reminder && reminder.title) || "").trim().toLowerCase();
+  return t === (HELPS_PREFIX + name).trim().toLowerCase();
+}
+
+// "What helps" cards: [{ m: mood title, or "*" for general, t: text }]
+function sanitizeHelps(list) {
+  let out = [];
+  let seen = {};
+  for (let c of list) {
+    if (!c || typeof c.m !== "string" || typeof c.t !== "string") continue;
+    let m = c.m.trim().slice(0, 80);
+    let t = c.t.trim().slice(0, 240);
+    if (!m || !t) continue;
+    let k = m.toLowerCase();
+    if (seen[k]) continue;
+    seen[k] = true;
+    out.push({ m: m, t: t });
+    if (out.length >= 30) break;
+  }
+  return out;
+}
+
+function parseHelps(reminder) {
+  if (!reminder || !reminder.notes) return [];
+  try {
+    let list = JSON.parse(reminder.notes);
+    return Array.isArray(list) ? sanitizeHelps(list) : [];
+  } catch (e) {
+    return [];
+  }
+}
+
 // Display-only: same face swap the widgets use. Stored reminder titles are never changed.
 function faceify(text) {
   return String(text || "")
@@ -233,8 +598,8 @@ function energyFor(mood) {
   return p && p.energy != null ? p.energy : null;
 }
 
-function energyDotsHtml(mood) {
-  let e = energyFor(mood);
+function energyDotsHtml(mood, forced) {
+  let e = forced != null ? forced : energyFor(mood);
   if (e == null) return "";
   let lvl = Math.max(1, Math.min(5, e));
   return (
@@ -243,6 +608,10 @@ function energyDotsHtml(mood) {
 }
 
 let myLatestReminderRef = null;
+let helpsState = { mine: [], partner: [], pKey: "", pMood: "" };
+let trendState = { names: ["", ""], me: {}, partner: {} };
+let entriesState = {};
+let loveState = { sent: 0, max: 3, to: "" };
 
 // ---- MOCK DATA GENERATOR ----
 function buildMockData() {
@@ -326,16 +695,35 @@ function buildSheetJs() {
   let json = safe(sheetMoods);
 
   // Info about my current check-in (for the Edit sheet)
-  let mine = { has: false, mood: "", note: "", time: "", idx: -1 };
+  let mine = {
+    has: false,
+    mood: "",
+    note: "",
+    nr: false,
+    cap: [0, 0, 0],
+    time: "",
+    idx: -1,
+  };
   if (myLatestReminderRef) {
     let mp = parseMood(myLatestReminderRef.title || "");
     let key = String(mp.mood).trim().toLowerCase();
+    let ns = splitNotes(myLatestReminderRef.notes);
     mine = {
       has: true,
       mood: faceify(mp.mood),
-      note: myLatestReminderRef.notes || "",
+      note: ns.text,
+      nr: ns.noReply,
+      cap: [
+        ns.cap.social || 0,
+        ns.cap.sensory || 0,
+        ["ok", "text", "none"].indexOf(ns.cap.talk) + 1,
+      ],
+      id: myLatestReminderRef.identifier || "",
       time: relTime(myLatestReminderRef.creationDate),
-      idx: moods.findIndex((m) => String(m.title).trim().toLowerCase() === key),
+      // -2 = the built-in Resting status
+      idx: isRestingMood(mp.mood)
+        ? -2
+        : moods.findIndex((m) => String(m.title).trim().toLowerCase() === key),
     };
   }
   let settingsData = {
@@ -344,12 +732,61 @@ function buildSheetJs() {
     qs: settings.quietStart,
     qe: settings.quietEnd,
   };
-  let data = { MOODS: json, MINE: safe(mine), SETTINGS: safe(settingsData) };
+  let helpsData = {
+    mine: helpsState.mine,
+    partner: helpsState.partner,
+    pName: partnerUserName,
+    pMood: helpsState.pMood,
+    pKey: helpsState.pKey,
+  };
+  let data = {
+    MOODS: json,
+    MINE: safe(mine),
+    SETTINGS: safe(settingsData),
+    HELPS: safe(helpsData),
+    TREND: safe(trendState),
+    ENTRIES: safe(entriesState),
+    LOVE: safe(
+      Object.assign({}, loveState, {
+        kinds: Object.keys(LOVE_KINDS).map((k) => ({
+          k: k,
+          e: LOVE_KINDS[k][0],
+          t: LOVE_KINDS[k][1],
+        })),
+      }),
+    ),
+    CIRCLES: safe({
+      active: activeCircle,
+      me: myUserName,
+      list: circles.map((c) => ({
+        n: c.partner,
+        l: c.list,
+        auto: c.autoShare ? 1 : 0,
+      })),
+    }),
+  };
 
   return `
 var MOODS = __MOODS__;
 var MINE = __MINE__;
 var SETTINGS = __SETTINGS__;
+var HELPS = __HELPS__;
+var TREND = __TREND__;
+var ENTRIES = __ENTRIES__;
+var LOVE = __LOVE__;
+var CIRCLES = __CIRCLES__;
+var EDIT_ID = "";
+var shareSel = [];
+var fAuto = [];
+var fDel = [];
+var fListEdited = false;
+var loveSel = "";
+var nr = [false, false];
+var CAPW = [[0, 0, 0], [0, 0, 0]];
+var capShown = [false, false];
+var tWho = 1;
+var tRange = 14;
+var helpRows = [];
 var selected = -1;
 var editSel = -1;
 var delArmed = false;
@@ -370,8 +807,11 @@ function $(id) { return document.getElementById(id); }
 function dotsFor(n) { var s = ""; for (var k = 1; k <= 5; k++) { s += (k <= n ? "●" : "○"); } return s; }
 
 function hourLabel(h) { return (h % 12 === 0 ? 12 : h % 12) + (h < 12 ? " AM" : " PM"); }
+function eh(s) { return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;"); }
 function chipsHtml(prefix, handler) {
-  var h = "";
+  var h = '<button type="button" class="chip rest-chip" id="' + prefix + 'rest" onclick="' + handler + '(-2)">' +
+    '<span class="chip-emoji">🌙</span><span class="chip-label">Resting</span>' +
+    '<span class="rest-sub">No check-ins needed. Reminders pause.</span></button>';
   for (var i = 0; i < MOODS.length; i++) {
     var m = MOODS[i];
     h += '<button type="button" class="chip" id="' + prefix + i + '" onclick="' + handler + '(' + i + ')">' +
@@ -385,8 +825,17 @@ function chipsHtml(prefix, handler) {
 function initSheet() {
   // Log Mood + Edit tiles
   var emptyMsg = '<div class="sheet-empty">No moods yet. Close this and tap Custom Mood to add one.</div>';
-  $("moodGrid").innerHTML = MOODS.length ? chipsHtml("chip_", "pick") : emptyMsg;
-  $("editGrid").innerHTML = MOODS.length ? chipsHtml("echip_", "pickEdit") : emptyMsg;
+  $("moodGrid").innerHTML = chipsHtml("chip_", "pick") + (MOODS.length ? "" : emptyMsg);
+  $("editGrid").innerHTML = chipsHtml("echip_", "pickEdit") + (MOODS.length ? "" : emptyMsg);
+  $("fName").addEventListener("input", function () {
+    if (!fListEdited) { var v = $("fName").value.trim(); $("fList").value = v ? "Mood Dashboard - " + v : ""; }
+    updateAdd();
+  });
+  $("fList").addEventListener("input", function () { fListEdited = true; updateAdd(); });
+  $("capHost0").innerHTML = capHtml(0);
+  $("capHost1").innerHTML = capHtml(1);
+  $("tw0l").textContent = TREND.names[0];
+  $("tw1l").textContent = TREND.names[1];
   // Reminders: hour options + quiet-hour selects
   var rs = "";
   for (var rk = 0; rk < HOUR_OPTS.length; rk++) {
@@ -446,30 +895,60 @@ function fitSheet() {
 }
 
 // ----- Log Mood -----
+function renderNr() {
+  $("nrBtn0").className = nr[0] ? "switch on" : "switch";
+  $("nrBtn1").className = nr[1] ? "switch on" : "switch";
+}
+function toggleNr(w) { nr[w] = !nr[w]; renderNr(); }
+function renderPick() {
+  $("chip_rest").className = (selected === -2) ? "chip rest-chip sel" : "chip rest-chip";
+  for (var k = 0; k < MOODS.length; k++) { $("chip_" + k).className = (k === selected) ? "chip sel" : "chip"; }
+}
 function openLog() {
   selected = -1;
   $("noteInput").value = "";
   $("logBtn").disabled = true;
-  for (var k = 0; k < MOODS.length; k++) { $("chip_" + k).className = "chip"; }
+  nr[0] = false;
+  renderNr();
+  resetCap(0, [0, 0, 0]);
+  renderPick();
+  shareSel = [];
+  var anyOn = false;
+  for (var si = 0; si < CIRCLES.list.length; si++) { shareSel.push(!!CIRCLES.list[si].auto); if (CIRCLES.list[si].auto) { anyOn = true; } }
+  if (!anyOn) { shareSel[CIRCLES.active] = true; }
+  renderShare();
+  var sb = $("sameBtn");
+  sb.disabled = false;
+  if (MINE.has) { sb.style.display = "flex"; sb.textContent = "↺ Same as last: " + MINE.mood; } else { sb.style.display = "none"; }
   showSheet("logSheet");
 }
 function pick(i) {
   selected = i;
-  for (var k = 0; k < MOODS.length; k++) { $("chip_" + k).className = (k === i) ? "chip sel" : "chip"; }
+  renderPick();
   $("logBtn").disabled = false;
 }
 function submitMood() {
-  if (selected < 0 || $("logBtn").disabled) { return; }
+  if (selected === -1 || $("logBtn").disabled) { return; }
   $("logBtn").disabled = true;
-  window.location.href = "http://localhost/saveMood?i=" + selected + "&note=" + encodeURIComponent($("noteInput").value);
+  window.location.href = "http://localhost/saveMood?i=" + (selected === -2 ? "rest" : selected) + "&nr=" + (nr[0] ? 1 : 0) + capQuery(0) + shareQuery() + "&note=" + encodeURIComponent($("noteInput").value);
+}
+function submitSame() {
+  $("sameBtn").disabled = true;
+  window.location.href = "http://localhost/saveSame" + (shareQuery() ? "?" + shareQuery().slice(1) : "");
 }
 
 // ----- Edit current check-in -----
-function openEdit() {
-  if (!MINE.has) { openLog(); return; }
-  editSel = MINE.idx;
-  $("editNote").value = MINE.note;
-  $("editSub").textContent = "Currently " + MINE.mood + " \u00b7 " + MINE.time;
+function openEdit(id) {
+  var key = id || MINE.id;
+  var e = ENTRIES[key];
+  if (!e) { openLog(); return; }
+  EDIT_ID = key;
+  editSel = e.idx;
+  $("editNote").value = e.note;
+  nr[1] = !!e.nr;
+  renderNr();
+  resetCap(1, e.cap);
+  $("editSub").textContent = "Currently " + e.mood + " · " + e.time + (CIRCLES.list.length > 1 ? ". Changes apply to " + CIRCLES.list[CIRCLES.active].n + "'s list only." : "");
   $("editSaveBtn").disabled = false;
   renderEdit();
   resetDelete();
@@ -477,12 +956,13 @@ function openEdit() {
 }
 function pickEdit(i) { editSel = i; renderEdit(); }
 function renderEdit() {
+  $("echip_rest").className = (editSel === -2) ? "chip rest-chip sel" : "chip rest-chip";
   for (var k = 0; k < MOODS.length; k++) { $("echip_" + k).className = (k === editSel) ? "chip sel" : "chip"; }
 }
 function submitEdit() {
   if ($("editSaveBtn").disabled) { return; }
   $("editSaveBtn").disabled = true;
-  window.location.href = "http://localhost/saveEdit?i=" + editSel + "&note=" + encodeURIComponent($("editNote").value);
+  window.location.href = "http://localhost/saveEdit?id=" + encodeURIComponent(EDIT_ID) + "&i=" + (editSel === -2 ? "rest" : editSel) + "&nr=" + (nr[1] ? 1 : 0) + capQuery(1) + "&note=" + encodeURIComponent($("editNote").value);
 }
 function resetDelete() {
   delArmed = false;
@@ -498,7 +978,259 @@ function askDelete() {
     delTimer = setTimeout(resetDelete, 4000);
     return;
   }
-  window.location.href = "http://localhost/deleteCheckin";
+  window.location.href = "http://localhost/deleteEntry?id=" + encodeURIComponent(EDIT_ID);
+}
+
+// ----- Friends (a separate shared list for each) -----
+function renderShare() {
+  var host = $("shareRow");
+  if (CIRCLES.list.length < 2) { host.style.display = "none"; return; }
+  var h = '<div class="caplabel">Share this check-in with</div><div class="share-chips">';
+  for (var i = 0; i < CIRCLES.list.length; i++) {
+    h += '<button type="button" class="switch' + (shareSel[i] ? ' on' : '') + '" onclick="toggleShare(' + i + ')">' + eh(CIRCLES.list[i].n) + '</button>';
+  }
+  host.innerHTML = h + '</div>';
+  host.style.display = "block";
+}
+function toggleShare(i) {
+  var on = 0;
+  for (var k = 0; k < shareSel.length; k++) { if (shareSel[k]) { on++; } }
+  if (shareSel[i] && on === 1) { return; }
+  shareSel[i] = !shareSel[i];
+  renderShare();
+}
+function shareQuery() {
+  if (CIRCLES.list.length < 2) { return ""; }
+  var t = [];
+  for (var i = 0; i < shareSel.length; i++) { if (shareSel[i]) { t.push(i); } }
+  return "&to=" + t.join(",");
+}
+function openFriends() {
+  fAuto = [];
+  fDel = [];
+  for (var i = 0; i < CIRCLES.list.length; i++) { fAuto.push(!!CIRCLES.list[i].auto); fDel.push(false); }
+  $("fName").value = "";
+  $("fList").value = "";
+  fListEdited = false;
+  $("fAddBtn").disabled = true;
+  renderFriends();
+  showSheet("friendsSheet");
+}
+function renderFriends() {
+  var n = CIRCLES.list.length;
+  var remaining = 0;
+  var changed = false;
+  var i;
+  for (i = 0; i < n; i++) { if (!fDel[i]) { remaining++; } }
+  var h = "";
+  for (i = 0; i < n; i++) {
+    var c = CIRCLES.list[i];
+    if (fDel[i] || (fAuto[i] ? 1 : 0) !== c.auto) { changed = true; }
+    var lock = (!fDel[i] && remaining <= 1);
+    h += '<div class="mrow' + (fDel[i] ? ' removed' : '') + '"><div class="mrow-top"><span class="mrow-label">' + eh(c.n) + '</span>' +
+      '<button type="button" class="trash"' + (lock ? ' disabled style="opacity:0.3"' : '') + ' onclick="toggleFDel(' + i + ')">' + (fDel[i] ? 'Undo' : '🗑️') + '</button></div>' +
+      '<div class="friend-list-name">List: ' + eh(c.l) + '</div>' +
+      '<div class="mrow-energy"><button type="button" class="switch' + (fAuto[i] ? ' on' : '') + '" onclick="toggleFAuto(' + i + ')">' + (fAuto[i] ? 'Sharing my check-ins' : 'Not sharing') + '</button></div></div>';
+  }
+  $("friendList").innerHTML = h;
+  $("fSaveBtn").disabled = !changed;
+}
+function toggleFAuto(i) { fAuto[i] = !fAuto[i]; renderFriends(); }
+function toggleFDel(i) { fDel[i] = !fDel[i]; renderFriends(); }
+function updateAdd() { $("fAddBtn").disabled = !($("fName").value.trim() && $("fList").value.trim()); }
+function addFriend() {
+  if ($("fAddBtn").disabled) { return; }
+  $("fAddBtn").disabled = true;
+  window.location.href = "http://localhost/addFriend?n=" + encodeURIComponent($("fName").value.trim()) + "&l=" + encodeURIComponent($("fList").value.trim());
+}
+function saveFriends() {
+  if ($("fSaveBtn").disabled) { return; }
+  $("fSaveBtn").disabled = true;
+  var flags = [];
+  var dels = [];
+  for (var i = 0; i < fAuto.length; i++) { flags.push(fAuto[i] ? 1 : 0); if (fDel[i]) { dels.push(i); } }
+  window.location.href = "http://localhost/saveFriends?s=" + flags.join(",") + "&d=" + dels.join(",");
+}
+
+// ----- Async Love -----
+function openLove() {
+  loveSel = "";
+  $("loveNote").value = "";
+  var h = "";
+  for (var i = 0; i < LOVE.kinds.length; i++) {
+    var k = LOVE.kinds[i];
+    h += '<button type="button" class="chip" id="love_' + k.k + '" onclick="pickLove(' + i + ')"><span class="chip-emoji">' + k.e + '</span><span class="chip-label">' + eh(k.t) + '</span></button>';
+  }
+  $("loveGrid").innerHTML = h;
+  $("loveTitle").textContent = "Send love to " + LOVE.to;
+  $("loveLimit").textContent = LOVE.sent >= LOVE.max ? "That is plenty for today. They will feel it." : (LOVE.sent > 0 ? "You have sent " + LOVE.sent + " today (up to " + LOVE.max + ")." : "");
+  $("loveSendBtn").disabled = true;
+  showSheet("loveSheet");
+}
+function pickLove(i) {
+  loveSel = LOVE.kinds[i].k;
+  for (var k = 0; k < LOVE.kinds.length; k++) { $("love_" + LOVE.kinds[k].k).className = (k === i) ? "chip sel" : "chip"; }
+  $("loveSendBtn").disabled = (LOVE.sent >= LOVE.max);
+}
+function submitLove() {
+  if (!loveSel || $("loveSendBtn").disabled) { return; }
+  $("loveSendBtn").disabled = true;
+  window.location.href = "http://localhost/saveLove?k=" + encodeURIComponent(loveSel) + "&n=" + encodeURIComponent($("loveNote").value);
+}
+
+// ----- Capacity (social battery, sensory load, talking) -----
+function capHtml(w) {
+  var TW = ["🗣️ Okay to talk", "💬 Text only", "🔇 No talking"];
+  var h = '<div class="caplabel">Social battery <span class="capend">1 drained · 5 full</span></div><div class="capseg">';
+  var n;
+  for (n = 1; n <= 5; n++) { h += '<button type="button" class="capb" id="cap' + w + '_0_' + n + '" onclick="setCap(' + w + ',0,' + n + ')">' + n + '</button>'; }
+  h += '</div><div class="caplabel">Sensory load <span class="capend">1 calm · 5 overloaded</span></div><div class="capseg">';
+  for (n = 1; n <= 5; n++) { h += '<button type="button" class="capb" id="cap' + w + '_1_' + n + '" onclick="setCap(' + w + ',1,' + n + ')">' + n + '</button>'; }
+  h += '</div><div class="caplabel">Talking</div><div class="capseg">';
+  for (var t = 1; t <= 3; t++) { h += '<button type="button" class="capb capt" id="cap' + w + '_2_' + t + '" onclick="setCap(' + w + ',2,' + t + ')">' + TW[t - 1] + '</button>'; }
+  return h + '</div>';
+}
+function renderCap(w) {
+  var n;
+  for (n = 1; n <= 5; n++) {
+    $("cap" + w + "_0_" + n).className = (CAPW[w][0] === n) ? "capb sel" : "capb";
+    $("cap" + w + "_1_" + n).className = (CAPW[w][1] === n) ? "capb sel" : "capb";
+  }
+  for (var t = 1; t <= 3; t++) { $("cap" + w + "_2_" + t).className = (CAPW[w][2] === t) ? "capb capt sel" : "capb capt"; }
+  var any = CAPW[w][0] || CAPW[w][1] || CAPW[w][2];
+  $("capBtn" + w).className = (any || capShown[w]) ? "switch on" : "switch";
+}
+function resetCap(w, arr) {
+  CAPW[w] = [arr[0] || 0, arr[1] || 0, arr[2] || 0];
+  capShown[w] = !!(CAPW[w][0] || CAPW[w][1] || CAPW[w][2]);
+  $("capHost" + w).style.display = capShown[w] ? "block" : "none";
+  renderCap(w);
+}
+function toggleCap(w) {
+  capShown[w] = !capShown[w];
+  $("capHost" + w).style.display = capShown[w] ? "block" : "none";
+  renderCap(w);
+}
+function setCap(w, k, v) { CAPW[w][k] = (CAPW[w][k] === v) ? 0 : v; renderCap(w); }
+function capQuery(w) {
+  var q = "";
+  if (CAPW[w][0]) { q += "&soc=" + CAPW[w][0]; }
+  if (CAPW[w][1]) { q += "&sen=" + CAPW[w][1]; }
+  if (CAPW[w][2]) { q += "&talk=" + ["ok", "text", "none"][CAPW[w][2] - 1]; }
+  return q;
+}
+
+// ----- Trends -----
+function openTrends(who) { tWho = who; renderTrends(); showSheet("trendSheet"); }
+function setTWho(w) { tWho = w; renderTrends(); }
+function setTRange(r) { tRange = r; renderTrends(); }
+function tstat(icon, text) { return '<div class="tstat"><span>' + icon + '</span><span>' + text + '</span></div>'; }
+function renderTrends() {
+  $("tw0").className = (tWho === 0) ? "eopt sel" : "eopt";
+  $("tw1").className = (tWho === 1) ? "eopt sel" : "eopt";
+  $("tr14").className = (tRange === 14) ? "eopt sel" : "eopt";
+  $("tr28").className = (tRange === 28) ? "eopt sel" : "eopt";
+  var t = (tWho === 0 ? TREND.me : TREND.partner)[String(tRange)];
+  var s = t.stats;
+  var who = TREND.names[tWho];
+  var h = "";
+  if (t.alert) {
+    h += '<div class="theads">📉 ' + (tWho === 0
+      ? "Your energy has been low on " + t.alert.low + " of the last 7 days. Running low for a while can mean you need more rest and fewer demands. Be gentle with yourself."
+      : eh(who) + "'s energy has been low on " + t.alert.low + " of the last 7 days. Running low for a while can mean someone needs more rest and fewer demands. A gentle check-in with no pressure to reply might help.") + '</div>';
+  }
+  var cols = "";
+  for (var i = 0; i < t.days.length; i++) {
+    var d = t.days[i];
+    var inner;
+    if (d.e !== null) {
+      var lvl = d.e <= 2 ? "low" : (d.e < 4 ? "mid" : "high");
+      inner = '<div class="tbar t-' + lvl + '" style="height:' + Math.round(d.e / 5 * 100) + '%"></div>';
+    } else if (d.r) {
+      inner = '<div class="trest">🌙</div>';
+    } else if (d.c > 0) {
+      inner = '<div class="tbar t-unk" style="height:14%"></div>';
+    } else {
+      inner = '<div class="tdot"></div>';
+    }
+    cols += '<div class="tcol">' + inner + '</div>';
+  }
+  var last = t.days.length - 1;
+  h += '<div class="tchart">' + cols + '</div>' +
+    '<div class="tlabels"><span>' + t.days[0].l + '</span><span>' + t.days[Math.floor(last / 2)].l + '</span><span>' + t.days[last].l + '</span></div>' +
+    '<div class="tlegend"><span><i class="lg lg-low"></i>Low (2 or below)</span><span><i class="lg lg-mid"></i>Middle</span><span><i class="lg lg-high"></i>High (4+)</span><span>🌙 Resting</span><span>· No check-in</span></div>';
+  var lines = "";
+  lines += tstat("📅", "Checked in on " + s.checkin + " of " + s.total + " days");
+  if (s.avg !== null) {
+    var trendTxt = "";
+    if (s.prev !== null) {
+      var diff = s.avg - s.prev;
+      trendTxt = diff >= 0.5 ? " (up from " + s.prev + " before)" : (diff <= -0.5 ? " (down from " + s.prev + " before)" : " (about the same as before)");
+    }
+    lines += tstat("⚡", "Average energy " + s.avg + "/5" + trendTxt);
+  }
+  if (s.withE > 0) { lines += tstat("📉", "Low energy on " + s.low + " of " + s.withE + " days with a check-in"); }
+  if (s.rest > 0) { lines += tstat("🌙", "Resting on " + s.rest + (s.rest === 1 ? " day" : " days")); }
+  if (s.socN >= 2) { lines += tstat("🔋", "Social battery averaged " + s.soc + "/5" + (s.soc <= 2 ? " (low)" : "")); }
+  if (s.senN >= 2) { lines += tstat("🔊", "Sensory load averaged " + s.sen + "/5" + (s.sen >= 4 ? " (high)" : "")); }
+  if (s.cant > 0) { lines += tstat("🔇", "Could not talk on " + s.cant + (s.cant === 1 ? " day" : " days")); }
+  if (s.checkin === 0) { lines = tstat("📅", "No check-ins in this period yet."); }
+  h += lines + '<div class="tnote">Based on check-ins only. A quiet stretch is not always a bad sign: it can just mean someone is resting.</div>';
+  $("trendBody").innerHTML = h;
+}
+
+// ----- What helps -----
+function openHelps() {
+  var p = HELPS.partner;
+  var spec = "";
+  var gen = "";
+  for (var i = 0; i < p.length; i++) {
+    if (p[i].m === "*") { gen = p[i].t; }
+    else if (p[i].m.trim().toLowerCase() === HELPS.pKey) { spec = p[i].t; }
+  }
+  var h = "";
+  if (spec) { h += '<div class="help-card"><div class="help-head">Right now · ' + eh(HELPS.pMood) + '</div><div class="help-text">' + eh(spec) + '</div></div>'; }
+  if (gen) { h += '<div class="help-card"><div class="help-head">In general</div><div class="help-text">' + eh(gen) + '</div></div>'; }
+  if (!h) { h = '<div class="sheet-empty">Nothing written yet.</div>'; }
+  $("helpsBody").innerHTML = h;
+  $("helpsTitle").textContent = "What helps " + HELPS.pName;
+  $("helpsSub").textContent = "Written by " + HELPS.pName + " for the people who care about them.";
+  showSheet("helpsSheet");
+}
+function openMyHelps() {
+  var rows = [
+    { m: "*", label: "💡 In general", ph: "e.g. Go gently. Quiet company, a snack, and no pressure to talk." },
+    { m: "🌙 Resting", label: "🌙 Resting", ph: "What would help while you're resting?" }
+  ];
+  for (var i = 0; i < MOODS.length; i++) {
+    rows.push({ m: MOODS[i].raw, label: MOODS[i].emoji + " " + MOODS[i].label, html: true, ph: "What helps when this is your status?" });
+  }
+  helpRows = rows;
+  var h = "";
+  for (var r = 0; r < rows.length; r++) {
+    h += '<div class="hrow"><div class="hrow-label">' + (rows[r].html ? rows[r].label : eh(rows[r].label)) + '</div>' +
+      '<textarea id="hta_' + r + '" class="note-input hta" rows="2" maxlength="240" placeholder="' + eh(rows[r].ph) + '"></textarea></div>';
+  }
+  $("helpsList").innerHTML = h;
+  for (var r2 = 0; r2 < rows.length; r2++) {
+    var v = "";
+    for (var c = 0; c < HELPS.mine.length; c++) {
+      if (HELPS.mine[c].m.trim().toLowerCase() === rows[r2].m.trim().toLowerCase()) { v = HELPS.mine[c].t; }
+    }
+    $("hta_" + r2).value = v;
+  }
+  $("helpsSaveBtn").disabled = false;
+  showSheet("myHelpsSheet");
+}
+function saveHelpsNow() {
+  if ($("helpsSaveBtn").disabled) { return; }
+  var cards = [];
+  for (var r = 0; r < helpRows.length; r++) {
+    var v = $("hta_" + r).value.trim();
+    if (v) { cards.push({ m: helpRows[r].m, t: v }); }
+  }
+  $("helpsSaveBtn").disabled = true;
+  window.location.href = "http://localhost/saveHelps?d=" + encodeURIComponent(JSON.stringify(cards));
 }
 
 // ----- Check-in reminders -----
@@ -627,13 +1359,21 @@ function submitManage() {
   for (var i = 0; i < mDel.length; i++) { if (mDel[i]) { d.push(i); } }
   window.location.href = "http://localhost/saveManage?e=" + mEnergy.join(",") + "&d=" + d.join(",");
 }
-`.replace(/__(MOODS|MINE|SETTINGS)__/g, (m, k) => data[k]);
+`.replace(
+    /__(MOODS|MINE|SETTINGS|HELPS|TREND|ENTRIES|LOVE|CIRCLES)__/g,
+    (m, k) => data[k],
+  );
 }
 
 async function buildHtml(state) {
   let allReminders = await Reminder.all([cal]);
   if (!allReminders || allReminders.length === 0)
     allReminders = buildMockData();
+
+  let myHelps = parseHelps(allReminders.find((r) => isHelpsFor(r, myUserName)));
+  let partnerHelps = parseHelps(
+    allReminders.find((r) => isHelpsFor(r, partnerUserName)),
+  );
 
   let myAvatarReminder = allReminders.find((r) => isAvatarFor(r, myUserName));
   let partnerAvatarReminder = allReminders.find((r) =>
@@ -659,10 +1399,8 @@ async function buildHtml(state) {
       esc(partnerUserName.charAt(0)) +
       "</div></div>";
 
-  // CRITICAL: Filter out any reminders containing "avatar" so they never show up in history
-  let reminders = allReminders.filter(
-    (r) => !r.title.toLowerCase().includes("avatar"),
-  );
+  // CRITICAL: Filter out data reminders (avatars, "Helps: <Name>") so they never show up in history
+  let reminders = allReminders.filter((r) => !isDataTitle(r.title));
   reminders.sort((a, b) => getTime(b) - getTime(a));
 
   let myLatest = null;
@@ -683,21 +1421,111 @@ async function buildHtml(state) {
   myLatestReminderRef = myLatest ? myLatest.r : null;
 
   let myMood = myLatest ? myLatest.mood : "No Status";
+  let mySplit = splitNotes(myLatest ? myLatest.r.notes : "");
+  let myResting = myLatest ? isRestingMood(myLatest.mood) : false;
   let myNote =
-    myLatest && myLatest.r.notes ? myLatest.r.notes : "Tap 'Log Mood'";
+    mySplit.text || (myResting ? "No check-ins needed" : "Tap 'Log Mood'");
   let myTime = myLatest ? relTime(myLatest.r.creationDate) : "--";
-  let myStale = myLatest ? isStale(myLatest.r.creationDate) : false;
+  // A resting status is never "stale": silence is expected, not worrying
+  // My own card never goes amber/dim: a "you're behind" cue reads as guilt
+  let myStale = false;
   let partnerMood = partnerLatest ? partnerLatest.mood : "No Status";
+  let partnerSplit = splitNotes(partnerLatest ? partnerLatest.r.notes : "");
+  let partnerResting = partnerLatest
+    ? isRestingMood(partnerLatest.mood)
+    : false;
   let partnerNote =
-    partnerLatest && partnerLatest.r.notes
-      ? partnerLatest.r.notes
-      : "No check-in yet";
+    partnerSplit.text ||
+    (partnerResting ? "No check-ins needed" : "No check-in yet");
   let partnerTime = partnerLatest
     ? relTime(partnerLatest.r.creationDate)
     : "--";
-  let partnerStale = partnerLatest
-    ? isStale(partnerLatest.r.creationDate)
-    : false;
+  let partnerStale =
+    partnerLatest && !partnerResting
+      ? isStale(partnerLatest.r.creationDate)
+      : false;
+
+  // "What helps" cards: show a pill when the partner wrote one for their current mood (or in general)
+  let partnerKey = String(partnerLatest ? partnerLatest.mood : "")
+    .trim()
+    .toLowerCase();
+  let showHelps = partnerHelps.some(
+    (c) => c.m === "*" || c.m.trim().toLowerCase() === partnerKey,
+  );
+  // My own entries by identifier (tap one in History to edit or delete it)
+  entriesState = {};
+  let entryCount = 0;
+  for (let r of reminders) {
+    let ep = parseMood(r.title);
+    if (ep.user.toLowerCase() !== myUserName.toLowerCase() || !r.identifier)
+      continue;
+    let ens = splitNotes(r.notes);
+    let ekey = String(ep.mood).trim().toLowerCase();
+    entriesState[r.identifier] = {
+      mood: faceify(ep.mood),
+      note: ens.text,
+      nr: ens.noReply,
+      cap: [
+        ens.cap.social || 0,
+        ens.cap.sensory || 0,
+        ["ok", "text", "none"].indexOf(ens.cap.talk) + 1,
+      ],
+      time: relTime(r.creationDate),
+      idx: isRestingMood(ep.mood)
+        ? -2
+        : moods.findIndex((m) => String(m.title).trim().toLowerCase() === ekey),
+    };
+    if (++entryCount >= 150) break;
+  }
+
+  // Async Love: notes from my friend to me (last 48h, not hidden) and how many I sent today
+  let loves = allReminders.map(parseLove).filter(Boolean);
+  let hiddenLove = loadHiddenLove();
+  let nowMs = Date.now();
+  let lovesIn = loves
+    .filter(
+      (l) =>
+        l.from.toLowerCase() === partnerUserName.toLowerCase() &&
+        l.to.toLowerCase() === myUserName.toLowerCase() &&
+        LOVE_KINDS[l.kind] &&
+        nowMs - l.t < 2 * DAY_MS &&
+        (!l.id || hiddenLove.indexOf(l.id) === -1),
+    )
+    .sort((a, b) => b.t - a.t)
+    .slice(0, 2);
+  loveState = {
+    sent: loves.filter(
+      (l) =>
+        l.from.toLowerCase() === myUserName.toLowerCase() &&
+        nowMs - l.t < DAY_MS,
+    ).length,
+    max: LOVE_MAX_PER_DAY,
+    to: partnerUserName,
+  };
+
+  // Trends for both people (also drives the "energy has been low" banner)
+  let meEntries = collectEntries(reminders, myUserName);
+  let partnerEntries = collectEntries(reminders, partnerUserName);
+  trendState = {
+    names: [myUserName, partnerUserName],
+    me: {
+      14: summarizeTrend(meEntries, 14),
+      28: summarizeTrend(meEntries, 28),
+    },
+    partner: {
+      14: summarizeTrend(partnerEntries, 14),
+      28: summarizeTrend(partnerEntries, 28),
+    },
+  };
+  // No banner while someone is resting: resting is already the response to low energy
+  let myAlert = myResting ? null : trendState.me["14"].alert;
+  let partnerAlert = partnerResting ? null : trendState.partner["14"].alert;
+  helpsState = {
+    mine: myHelps,
+    partner: partnerHelps,
+    pKey: partnerKey,
+    pMood: faceify(partnerLatest ? partnerLatest.mood : ""),
+  };
 
   let years = [];
   let grouped = {};
@@ -752,12 +1580,23 @@ async function buildHtml(state) {
         ';">';
       for (let r of list) {
         let p = parseMood(r.title);
+        let hs = splitNotes(r.notes);
+        let isMine =
+          p.user.toLowerCase() === myUserName.toLowerCase() && !!r.identifier;
         let cls =
           p.user.toLowerCase() === myUserName.toLowerCase()
             ? "tag-me"
             : "tag-partner";
         historyHtml +=
-          '<div class="card"><div><div class="user-tag ' +
+          '<div class="card' +
+          (isMine ? " mine" : "") +
+          '"' +
+          (isMine
+            ? ' data-id="' +
+              esc(r.identifier) +
+              '" onclick="openEdit(this.getAttribute(\'data-id\'))"'
+            : "") +
+          '><div><div class="user-tag ' +
           cls +
           '">' +
           esc(p.user) +
@@ -765,10 +1604,12 @@ async function buildHtml(state) {
           '<div class="title">' +
           esc(faceify(p.mood)) +
           "</div>" +
-          (r.notes ? '<div class="note">' + esc(r.notes) + "</div>" : "") +
+          (hs.text ? '<div class="note">' + esc(hs.text) + "</div>" : "") +
+          (hs.noReply ? '<div class="nr-pill">🔕 No reply needed</div>' : "") +
+          capChipsHtml(hs.cap) +
           '</div><div class="time">' +
           esc(formatDate(r.creationDate)) +
-          energyDotsHtml(p.mood) +
+          energyDotsHtml(p.mood, hs.cap.energy) +
           "</div></div>";
       }
       historyHtml += "</div>";
@@ -870,6 +1711,7 @@ async function buildHtml(state) {
     ".top-actions{display:flex;align-items:center;gap:8px}",
     ".iconbtn{cursor:pointer;font-size:16px;line-height:1;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.12);border-radius:12px;padding:9px 12px}",
     ".iconbtn:active{opacity:0.6}",
+    ".iconbtn.off{opacity:0.45}",
     ".danger-link{display:block;width:100%;margin-top:6px;background:none;border:none;color:#fca5a5;font:inherit;font-weight:600;font-size:14px;padding:12px}",
     ".danger-link.armed{color:#fff;background:rgba(239,68,68,0.35);border-radius:12px}",
     ".ghost-link{display:block;width:100%;margin-top:10px;background:none;border:none;color:#a5b4fc;font:inherit;font-weight:600;font-size:14px;padding:10px}",
@@ -881,6 +1723,72 @@ async function buildHtml(state) {
     ".switch.on{background:#6366f1;border-color:#6366f1;color:#fff}",
     ".hsel{color-scheme:dark;background:rgba(255,255,255,0.07);border:1px solid rgba(255,255,255,0.12);border-radius:12px;color:#fff;font-size:16px;padding:10px 8px;font-family:inherit}",
     ".hsel:disabled{opacity:0.4}",
+    ".resting{border-color:rgba(129,140,248,0.4)}",
+    ".nr-pill{display:inline-block;font-size:11px;font-weight:600;color:#c7d2fe;background:rgba(99,102,241,0.18);border:1px solid rgba(99,102,241,0.35);border-radius:999px;padding:3px 9px;margin:0 0 8px 0}",
+    ".helps-pill{display:inline-block;cursor:pointer;font-size:12px;font-weight:700;color:#fde68a;background:rgba(251,191,36,0.14);border:1px solid rgba(251,191,36,0.4);border-radius:999px;padding:5px 11px;margin:2px 0 8px 0}",
+    ".helps-pill:active{opacity:0.6}",
+    ".samebtn{appearance:none;-webkit-appearance:none;display:flex;align-items:center;justify-content:center;width:100%;box-sizing:border-box;margin:0 0 12px 0;padding:12px;border-radius:14px;border:1px dashed rgba(129,140,248,0.5);background:rgba(99,102,241,0.12);color:#c7d2fe;font:inherit;font-weight:600;font-size:14px}",
+    ".samebtn:disabled{opacity:0.5}",
+    ".rest-chip{grid-column:1 / -1;flex-direction:row;align-items:center;gap:10px}",
+    ".rest-chip .chip-emoji{font-size:24px}",
+    ".rest-sub{margin-left:auto;text-align:right;font-size:12px;color:rgba(255,255,255,0.6)}",
+    ".mood-grid .sheet-empty{grid-column:1 / -1}",
+    ".nr-row{margin-top:10px}",
+    ".help-card{padding:12px 14px;border-radius:14px;background:rgba(251,191,36,0.1);border:1px solid rgba(251,191,36,0.3);margin-bottom:10px}",
+    ".help-head{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;color:#fde68a;margin-bottom:4px}",
+    ".help-text{font-size:15px;line-height:1.4;overflow-wrap:anywhere}",
+    ".hrow{margin-bottom:6px}",
+    ".hrow-label{font-size:13px;font-weight:700;color:rgba(255,255,255,0.8);margin-top:8px}",
+    ".hta{margin-top:6px;resize:none;min-height:64px;line-height:1.35}",
+    ".cap-row{margin-top:10px}",
+    ".capbox{margin-top:10px;padding:12px;border-radius:14px;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.1)}",
+    ".caplabel{font-size:12px;font-weight:700;color:rgba(255,255,255,0.7);margin:10px 0 6px}",
+    ".capbox .caplabel:first-child{margin-top:0}",
+    ".capend{font-weight:500;color:rgba(255,255,255,0.45);margin-left:6px;font-size:11px}",
+    ".capseg{display:flex;gap:6px}",
+    ".capb{appearance:none;-webkit-appearance:none;flex:1;min-width:0;font:inherit;font-weight:700;font-size:15px;color:#fff;padding:10px 4px;border-radius:12px;border:1.5px solid rgba(255,255,255,0.1);background:rgba(255,255,255,0.06)}",
+    ".capb.capt{font-size:12px}",
+    ".capb.sel{background:rgba(99,102,241,0.25);border-color:#6366f1;box-shadow:0 0 0 2px rgba(99,102,241,0.25)}",
+    ".cap-chips{display:flex;flex-wrap:wrap;gap:5px;margin:0 0 8px 0}",
+    ".cap-chip{font-size:11px;font-weight:600;color:rgba(255,255,255,0.8);background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.14);border-radius:999px;padding:3px 8px}",
+    ".cap-chip.warn{color:#fde68a;background:rgba(251,191,36,0.12);border-color:rgba(251,191,36,0.35)}",
+    ".alert-banner{cursor:pointer;margin:0 0 14px 0;padding:12px 14px;border-radius:14px;background:rgba(251,191,36,0.1);border:1px solid rgba(251,191,36,0.35);color:#fde68a;font-size:13px;line-height:1.4}",
+    ".alert-banner:active{opacity:0.6}",
+    ".trend-body{max-height:50vh;overflow-y:auto;margin-top:12px}",
+    ".tchart{display:flex;align-items:flex-end;gap:2px;height:110px;padding:6px 0 0;border-bottom:1px solid rgba(255,255,255,0.12)}",
+    ".tcol{flex:1;min-width:0;height:100%;display:flex;align-items:flex-end;justify-content:center}",
+    ".tbar{width:100%;border-radius:3px 3px 0 0;min-height:4px}",
+    ".t-low{background:#fbbf24}",
+    ".t-mid{background:#818cf8}",
+    ".t-high{background:#34d399}",
+    ".t-unk{background:rgba(255,255,255,0.25)}",
+    ".tdot{width:4px;height:4px;border-radius:50%;background:rgba(255,255,255,0.25);margin-bottom:2px}",
+    ".trest{font-size:11px;line-height:1;margin-bottom:2px}",
+    ".tlabels{display:flex;justify-content:space-between;font-size:10px;color:rgba(255,255,255,0.5);margin-top:4px}",
+    ".tlegend{display:flex;flex-wrap:wrap;gap:10px;font-size:10px;color:rgba(255,255,255,0.55);margin:8px 0 10px}",
+    ".lg{display:inline-block;width:8px;height:8px;border-radius:2px;margin-right:4px}",
+    ".lg-low{background:#fbbf24}",
+    ".lg-mid{background:#818cf8}",
+    ".lg-high{background:#34d399}",
+    ".tstat{display:flex;gap:10px;padding:9px 0;border-bottom:1px solid rgba(255,255,255,0.06);font-size:14px;line-height:1.35}",
+    ".tnote{font-size:12px;color:rgba(255,255,255,0.5);margin-top:12px;line-height:1.4}",
+    ".theads{padding:12px 14px;border-radius:14px;background:rgba(251,191,36,0.1);border:1px solid rgba(251,191,36,0.35);color:#fde68a;font-size:13px;line-height:1.45;margin-bottom:12px}",
+    ".friend-bar{display:flex;gap:8px;flex-wrap:wrap;margin:-6px 0 14px 0}",
+    ".fchip{cursor:pointer;text-decoration:none;font-size:13px;font-weight:700;color:rgba(255,255,255,0.75);background:rgba(255,255,255,0.07);border:1px solid rgba(255,255,255,0.12);border-radius:999px;padding:7px 14px}",
+    ".fchip.active{color:#fff;background:#6366f1;border-color:#6366f1}",
+    ".fchip.add{color:#a5b4fc}",
+    ".love-pill{display:inline-block;cursor:pointer;font-size:12px;font-weight:700;color:#fbcfe8;background:rgba(244,114,182,0.14);border:1px solid rgba(244,114,182,0.4);border-radius:999px;padding:5px 11px;margin:2px 6px 8px 0}",
+    ".love-pill:active{opacity:0.6}",
+    ".love-card{margin:0 0 12px 0;padding:12px 14px;border-radius:14px;background:rgba(244,114,182,0.1);border:1px solid rgba(244,114,182,0.35)}",
+    ".love-main{font-size:14px;line-height:1.4}",
+    ".love-note{font-size:14px;font-style:italic;color:rgba(255,255,255,0.8);margin-top:4px}",
+    ".love-meta{font-size:11px;color:rgba(255,255,255,0.5);margin-top:6px}",
+    ".love-hide{color:rgba(255,255,255,0.6)}",
+    ".card.mine{cursor:pointer}",
+    ".card.mine:active{opacity:0.7}",
+    ".share-row{margin-top:10px}",
+    ".share-chips{display:flex;flex-wrap:wrap;gap:6px}",
+    ".friend-list-name{font-size:12px;color:rgba(255,255,255,0.5);margin:2px 0 4px 0;overflow-wrap:anywhere}",
     ".top-bar{display:flex;justify-content:space-between;align-items:center;margin-bottom:16px}",
     ".top-bar h2{margin:0}",
     ".refresh{color:#818cf8;text-decoration:none;font-size:13px;font-weight:700;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.12);border-radius:12px;padding:8px 14px}",
@@ -900,14 +1808,29 @@ async function buildHtml(state) {
     buildSheetJs() +
     "</script></head><body>" +
     '<div class="top-bar"><h2>Dashboard</h2><div class="top-actions">' +
-    '<div class="iconbtn" onclick="openRemind()">' +
-    (settings.reminderHours ? "🔔" : "🔕") +
-    "</div>" +
+    '<div class="iconbtn' +
+    (settings.reminderHours ? "" : " off") +
+    '" onclick="openRemind()">🔔</div>' +
     '<a class="refresh" href="http://localhost/refresh">↻ Refresh</a></div></div>' +
+    '<div class="friend-bar">' +
+    circles
+      .map(
+        (c, i) =>
+          '<a class="fchip' +
+          (i === activeCircle ? " active" : "") +
+          '" href="http://localhost/switch?i=' +
+          i +
+          '">' +
+          esc(c.partner) +
+          "</a>",
+      )
+      .join("") +
+    '<div class="fchip add" onclick="openFriends()">＋</div></div>' +
     '<div class="dual-container">' +
     // YOU CARD
     '<div class="hero' +
     (myStale ? " stale" : "") +
+    (myResting ? " resting" : "") +
     '">' +
     '<div class="hero-header">' +
     myAvatarHtml +
@@ -919,10 +1842,12 @@ async function buildHtml(state) {
     '<div class="hero-title">' +
     esc(faceify(myMood)) +
     "</div>" +
-    energyDotsHtml(myMood) +
+    energyDotsHtml(myMood, mySplit.cap.energy) +
     '<div class="note" style="margin-bottom:8px;">"' +
     esc(myNote) +
     '"</div>' +
+    (mySplit.noReply ? '<div class="nr-pill">🔕 No reply needed</div>' : "") +
+    capChipsHtml(mySplit.cap) +
     '<div class="time" style="text-align:left">' +
     esc(myTime) +
     "</div>" +
@@ -930,6 +1855,7 @@ async function buildHtml(state) {
     // PARTNER CARD (Styled with Pink Accent)
     '<div class="hero hero-partner' +
     (partnerStale ? " stale" : "") +
+    (partnerResting ? " resting" : "") +
     '">' +
     '<div class="hero-header">' +
     partnerAvatarHtml +
@@ -940,21 +1866,65 @@ async function buildHtml(state) {
     '<div class="hero-title">' +
     esc(faceify(partnerMood)) +
     "</div>" +
-    energyDotsHtml(partnerMood) +
+    energyDotsHtml(partnerMood, partnerSplit.cap.energy) +
     '<div class="note" style="margin-bottom:8px;">"' +
     esc(partnerNote) +
     '"</div>' +
+    (partnerSplit.noReply
+      ? '<div class="nr-pill">🔕 No reply needed</div>'
+      : "") +
+    capChipsHtml(partnerSplit.cap) +
+    (showHelps
+      ? '<div class="helps-pill" onclick="openHelps()">💡 What helps</div>'
+      : "") +
+    '<div class="love-pill" onclick="openLove()">💌 Send love</div>' +
     '<div class="time" style="text-align:left">' +
     esc(partnerTime) +
     "</div>" +
     "</div>" +
     "</div>" +
+    lovesIn
+      .map(
+        (l) =>
+          '<div class="love-card"><div class="love-main">💌 <b>' +
+          esc(l.from) +
+          "</b> · " +
+          LOVE_KINDS[l.kind][0] +
+          " " +
+          esc(LOVE_KINDS[l.kind][1]) +
+          "</div>" +
+          (l.note ? '<div class="love-note">"' + esc(l.note) + '"</div>' : "") +
+          '<div class="love-meta">' +
+          esc(relTime(l.t)) +
+          " · no reply needed" +
+          (l.id
+            ? ' · <a class="love-hide" href="http://localhost/hideLove?id=' +
+              encodeURIComponent(l.id) +
+              '">Hide</a>'
+            : "") +
+          "</div></div>",
+      )
+      .join("") +
+    (partnerAlert
+      ? '<div class="alert-banner" onclick="openTrends(1)">📉 <b>' +
+        esc(partnerUserName) +
+        "</b>'s energy has been low on " +
+        partnerAlert.low +
+        " of the last 7 days. <u>See trends</u></div>"
+      : "") +
+    (myAlert
+      ? '<div class="alert-banner" onclick="openTrends(0)">📉 Your energy has been low on ' +
+        myAlert.low +
+        " of the last 7 days. Be gentle with yourself. <u>See trends</u></div>"
+      : "") +
     '<div class="btn" style="cursor:pointer" onclick="openLog()">📝 Log Mood</div>' +
     '<div class="btn-row">' +
-    '<div class="btn btn-sec" style="cursor:pointer" onclick="openCustom()">➕ Custom Mood</div>' +
-    '<div class="btn btn-sec" style="cursor:pointer" onclick="openManage()">🗑️ Manage Moods</div>' +
+    '<div class="btn btn-sec" style="cursor:pointer" onclick="openManage()">🎛 Moods</div>' +
+    '<div class="btn btn-sec" style="cursor:pointer" onclick="openMyHelps()">💡 Helps me</div>' +
+    '<div class="btn btn-sec" style="cursor:pointer" onclick="openTrends(1)">📈 Trends</div>' +
     "</div>" +
-    '<h3 style="font-size:16px;color:rgba(255,255,255,0.8);margin:24px 0 10px 0;">History Feed</h3>' +
+    '<h3 style="font-size:16px;color:rgba(255,255,255,0.8);margin:24px 0 4px 0;">History Feed</h3>' +
+    '<div class="tnote" style="margin:0 0 10px 0">Tap one of your own entries to edit or delete it.</div>' +
     "<div>" +
     historyHtml +
     "</div>" +
@@ -967,8 +1937,12 @@ async function buildHtml(state) {
     '<div class="sheet-sub">Logging as ' +
     esc(myUserName) +
     "</div>" +
+    '<button type="button" id="sameBtn" class="samebtn" style="display:none" onclick="submitSame()"></button>' +
     '<div id="moodGrid" class="mood-grid"></div>' +
     '<input id="noteInput" class="note-input" type="text" maxlength="140" placeholder="Add a note (optional)" autocomplete="off" autocapitalize="sentences">' +
+    '<div class="nr-row"><button type="button" id="nrBtn0" class="switch" onclick="toggleNr(0)">🔕 No reply needed</button> <button type="button" id="capBtn0" class="switch" onclick="toggleCap(0)">📊 Capacity</button></div>' +
+    '<div id="capHost0" class="capbox" style="display:none"></div>' +
+    '<div id="shareRow" class="share-row" style="display:none"></div>' +
     '<div class="sheet-actions">' +
     '<button type="button" class="sbtn" onclick="closeSheet()">Cancel</button>' +
     '<button type="button" id="logBtn" class="sbtn sbtn-primary" onclick="submitMood()" disabled>Log Mood</button>' +
@@ -980,6 +1954,8 @@ async function buildHtml(state) {
     '<div id="editSub" class="sheet-sub"></div>' +
     '<div id="editGrid" class="mood-grid"></div>' +
     '<input id="editNote" class="note-input" type="text" maxlength="140" placeholder="Add a note (optional)" autocomplete="off" autocapitalize="sentences">' +
+    '<div class="nr-row"><button type="button" id="nrBtn1" class="switch" onclick="toggleNr(1)">🔕 No reply needed</button> <button type="button" id="capBtn1" class="switch" onclick="toggleCap(1)">📊 Capacity</button></div>' +
+    '<div id="capHost1" class="capbox" style="display:none"></div>' +
     '<div class="sheet-actions">' +
     '<button type="button" class="sbtn" onclick="closeSheet()">Cancel</button>' +
     '<button type="button" id="editSaveBtn" class="sbtn sbtn-primary" onclick="submitEdit()">Save changes</button>' +
@@ -1001,6 +1977,61 @@ async function buildHtml(state) {
     '<div class="sheet-actions">' +
     '<button type="button" class="sbtn" onclick="closeSheet()">Cancel</button>' +
     '<button type="button" class="sbtn sbtn-primary" onclick="saveRemind()">Save</button>' +
+    "</div></div>" +
+    // --- Friends ---
+    '<div id="friendsSheet" class="sheet">' +
+    '<div class="grabber"></div>' +
+    '<h3 class="sheet-title">Friends</h3>' +
+    '<div class="sheet-sub">Each friend has their own Reminders list, so what you share with one person stays between the two of you.</div>' +
+    '<div id="friendList" class="mlist"></div>' +
+    '<div class="elabel">Add a friend</div>' +
+    '<input id="fName" class="note-input" style="margin-top:0" type="text" maxlength="40" placeholder="Their name" autocomplete="off" autocapitalize="words">' +
+    '<input id="fList" class="note-input" type="text" maxlength="80" placeholder="Reminders list name" autocomplete="off">' +
+    '<div class="sheet-sub" style="margin-top:6px">Use a list you already share, or a new name and the list will be created for you to share. They must use your name exactly as it appears in your check-ins.</div>' +
+    '<button type="button" id="fAddBtn" class="samebtn" style="display:flex" onclick="addFriend()" disabled>＋ Add friend</button>' +
+    '<div class="sheet-actions">' +
+    '<button type="button" class="sbtn" onclick="closeSheet()">Close</button>' +
+    '<button type="button" id="fSaveBtn" class="sbtn sbtn-primary" onclick="saveFriends()" disabled>Save changes</button>' +
+    "</div></div>" +
+    // --- Send love ---
+    '<div id="loveSheet" class="sheet">' +
+    '<div class="grabber"></div>' +
+    '<h3 id="loveTitle" class="sheet-title">Send love</h3>' +
+    '<div class="sheet-sub">No reply needed. They will see it next time they open the app or widget. There is no read receipt, and nothing buzzes their phone.</div>' +
+    '<div id="loveGrid" class="mood-grid"></div>' +
+    '<input id="loveNote" class="note-input" type="text" maxlength="80" placeholder="Add a short note (optional)" autocomplete="off" autocapitalize="sentences">' +
+    '<div id="loveLimit" class="cwarn"></div>' +
+    '<div class="sheet-actions">' +
+    '<button type="button" class="sbtn" onclick="closeSheet()">Cancel</button>' +
+    '<button type="button" id="loveSendBtn" class="sbtn sbtn-primary" onclick="submitLove()" disabled>Send love</button>' +
+    "</div></div>" +
+    // --- Trends ---
+    '<div id="trendSheet" class="sheet">' +
+    '<div class="grabber"></div>' +
+    '<h3 class="sheet-title">Trends</h3>' +
+    '<div class="sheet-sub">How energy and capacity have been over time.</div>' +
+    '<div class="eseg"><button type="button" id="tw0" class="eopt" onclick="setTWho(0)"><span id="tw0l" class="hlabel"></span></button><button type="button" id="tw1" class="eopt" onclick="setTWho(1)"><span id="tw1l" class="hlabel"></span></button></div>' +
+    '<div class="eseg" style="margin-top:8px"><button type="button" id="tr14" class="eopt" onclick="setTRange(14)"><span class="hlabel">14 days</span></button><button type="button" id="tr28" class="eopt" onclick="setTRange(28)"><span class="hlabel">28 days</span></button></div>' +
+    '<div id="trendBody" class="trend-body"></div>' +
+    '<div class="sheet-actions"><button type="button" class="sbtn sbtn-primary" onclick="closeSheet()">Close</button></div>' +
+    "</div>" +
+    // --- What helps (viewing the partner's cards) ---
+    '<div id="helpsSheet" class="sheet">' +
+    '<div class="grabber"></div>' +
+    '<h3 id="helpsTitle" class="sheet-title">What helps</h3>' +
+    '<div id="helpsSub" class="sheet-sub"></div>' +
+    '<div id="helpsBody"></div>' +
+    '<div class="sheet-actions"><button type="button" class="sbtn sbtn-primary" onclick="closeSheet()">Got it</button></div>' +
+    "</div>" +
+    // --- What helps me (writing my own cards) ---
+    '<div id="myHelpsSheet" class="sheet">' +
+    '<div class="grabber"></div>' +
+    '<h3 class="sheet-title">What helps me</h3>' +
+    '<div class="sheet-sub">Write these when you have the energy. People who care about you see the matching card when your status changes, so they don\'t have to guess. Anyone with access to the shared list can read them.</div>' +
+    '<div id="helpsList" class="mlist"></div>' +
+    '<div class="sheet-actions">' +
+    '<button type="button" class="sbtn" onclick="closeSheet()">Cancel</button>' +
+    '<button type="button" id="helpsSaveBtn" class="sbtn sbtn-primary" onclick="saveHelpsNow()">Save</button>' +
     "</div></div>" +
     // --- Custom Mood ---
     '<div id="customSheet" class="sheet">' +
@@ -1025,6 +2056,7 @@ async function buildHtml(state) {
     '<div class="grabber"></div>' +
     '<h3 class="sheet-title">Manage moods</h3>' +
     '<div class="sheet-sub">Tap the dots to set energy, or remove a mood. Nothing changes until you save.</div>' +
+    '<button type="button" class="samebtn" style="display:flex" onclick="closeSheet();openCustom()">＋ New mood</button>' +
     '<div id="mHint" class="mhint">Every mood has the same energy right now. Tap the dots to set each one.</div>' +
     '<div id="manageList" class="mlist"></div>' +
     '<div class="sheet-actions">' +
@@ -1055,32 +2087,240 @@ function parseQuery(url) {
 // title "[Name] <mood title>", notes = optional note.
 async function saveMoodFromUrl(url) {
   let q = parseQuery(url || "");
-  let idx = parseInt(q.i, 10);
-  if (isNaN(idx) || idx < 0 || idx >= moods.length) return;
+  let title = null;
+  if (q.i === "rest") {
+    title = REST_TITLE;
+  } else {
+    let idx = parseInt(q.i, 10);
+    if (isNaN(idx) || idx < 0 || idx >= moods.length) return;
+    title = moods[idx].title;
+  }
 
-  let r = new Reminder();
-  r.title = "[" + myUserName + "] " + moods[idx].title;
-  r.notes = (q.note || "").trim();
-  r.calendar = cal;
+  // Capacity from the sheet, plus this mood's energy so trends don't depend on presets
+  let cap = capFromQuery(q);
+  let energy = energyOfTitle(title);
+  if (energy != null) cap.energy = energy;
+
+  let targets = q.to ? parseTargets(q.to) : [activeCircle];
+  if (!targets.length) targets = [activeCircle];
+  await writeCheckins(targets, title, buildNotes(q.note, q.nr === "1", cap));
+}
+
+// "Same as last" button: logs my previous check-in again, copying its note,
+// "no reply needed" flag and capacity (energy is re-read so older check-ins gain it)
+async function saveSameFromUrl(url) {
+  let prev = myLatestReminderRef;
+  if (!prev) return;
+  let q = parseQuery(url || "");
+  let targets = q.to ? parseTargets(q.to) : [activeCircle];
+  if (!targets.length) targets = [activeCircle];
+  let mood = parseMood(prev.title || "").mood;
+  let ns = splitNotes(prev.notes);
+  let cap = Object.assign({}, ns.cap);
+  let energy = energyOfTitle(mood);
+  if (cap.energy == null && energy != null) cap.energy = energy;
+  await writeCheckins(targets, mood, buildNotes(ns.text, ns.noReply, cap));
+}
+
+// Edit sheet -> change mood, note, flags and capacity on my latest check-in
+// One of MY check-ins in the active list, by identifier (never a data reminder or the friend's entry)
+async function findMyEntry(id) {
+  if (!id) return myLatestReminderRef;
+  let all = await Reminder.all([cal]);
+  let r = all.find((x) => x.identifier === id);
+  if (!r || isDataTitle(r.title)) return null;
+  if (parseMood(r.title || "").user.toLowerCase() !== myUserName.toLowerCase())
+    return null;
+  return r;
+}
+
+async function saveEditFromUrl(url) {
+  let q = parseQuery(url || "");
+  let r = await findMyEntry(q.id);
+  if (!r || typeof r.save !== "function") return;
+  let before = splitNotes(r.notes);
+  let cap = capFromQuery(q);
+  let moodTitle = null;
+  if (q.i === "rest") {
+    moodTitle = REST_TITLE;
+  } else {
+    let idx = parseInt(q.i, 10);
+    if (!isNaN(idx) && idx >= 0 && idx < moods.length)
+      moodTitle = moods[idx].title;
+  }
+  if (moodTitle) {
+    r.title = "[" + myUserName + "] " + moodTitle;
+    let e = energyOfTitle(moodTitle);
+    if (e != null) cap.energy = e;
+  } else {
+    // mood unchanged: keep the energy already stored (or read it from my presets)
+    let e =
+      before.cap.energy != null
+        ? before.cap.energy
+        : energyOfTitle(parseMood(r.title || "").mood);
+    if (e != null) cap.energy = e;
+  }
+  r.notes = buildNotes(q.note, q.nr === "1", cap);
   await r.save();
 }
 
-// Edit sheet -> change mood and/or note on my latest check-in
-async function saveEditFromUrl(url) {
-  let r = myLatestReminderRef;
-  if (!r || typeof r.save !== "function") return;
+// "What helps me" sheet -> saves my cards into a "Helps: <Name>" reminder in each shared list
+async function saveHelpsFromUrl(url) {
   let q = parseQuery(url || "");
-  let idx = parseInt(q.i, 10);
-  if (!isNaN(idx) && idx >= 0 && idx < moods.length) {
-    r.title = "[" + myUserName + "] " + moods[idx].title;
+  let cards;
+  try {
+    cards = sanitizeHelps(JSON.parse(q.d || "[]"));
+  } catch (e) {
+    return;
   }
-  r.notes = (q.note || "").trim();
-  await r.save();
+  for (let k of shareCalendars()) {
+    let all = await Reminder.all([k]);
+    let existing = all.find((r) => isHelpsFor(r, myUserName));
+    if (!cards.length) {
+      if (existing) await existing.remove();
+      continue;
+    }
+    let r = existing || new Reminder();
+    if (!existing) {
+      r.title = HELPS_PREFIX + myUserName;
+      r.calendar = k;
+    }
+    r.notes = JSON.stringify(cards);
+    await r.save();
+  }
+}
+
+// ---- Quick log: log a mood with no UI ----
+// From a Shortcut ("Run Script" with the mood name as input) or a URL:
+//   scriptable:///run/mood-dashboard?mood=Low%20Battery&note=quiet&noreply=1
+// Special names: "rest" (Resting) and "last" (same as my previous check-in)
+function normName(s) {
+  return String(s || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+function resolveQuickMood(spec, latestReminder) {
+  let n = normName(spec);
+  if (!n) return null;
+  if (n === "last" || n === "same" || n === "same as last") {
+    return latestReminder ? parseMood(latestReminder.title || "").mood : null;
+  }
+  if (n === "rest" || n === "resting") return REST_TITLE;
+  let exact = moods.find((m) => normName(m.title) === n);
+  if (exact) return exact.title;
+  let partial = moods.find((m) => {
+    let t = normName(m.title);
+    return t && (t.includes(n) || n.includes(t));
+  });
+  return partial ? partial.title : null;
+}
+
+function readQuickParams() {
+  let sp = args.shortcutParameter;
+  let qp = args.queryParameters || {};
+  let spec = null;
+  let note = "";
+  let noReply = false;
+  let cap = {};
+  let to = null;
+  let viaShortcut = false;
+  if (sp !== undefined && sp !== null && sp !== "") {
+    viaShortcut = true;
+    let obj = null;
+    if (typeof sp === "object") obj = sp;
+    else if (String(sp).trim().startsWith("{")) {
+      try {
+        obj = JSON.parse(String(sp));
+      } catch (e) {}
+    }
+    if (obj) {
+      spec = obj.mood;
+      note = obj.note || "";
+      noReply = !!obj.noReply;
+      cap = capFromQuery({ soc: obj.social, sen: obj.sensory, talk: obj.talk });
+      if (obj.to) to = [].concat(obj.to).map(String);
+    } else {
+      spec = String(sp).trim();
+    }
+  } else if (qp.mood) {
+    spec = qp.mood;
+    note = qp.note || "";
+    noReply = qp.noreply === "1" || qp.noreply === "true";
+    cap = capFromQuery(qp);
+    if (qp.to) to = String(qp.to).split(",");
+  }
+  if (!spec) return null;
+  return {
+    spec: String(spec),
+    note: note,
+    noReply: noReply,
+    cap: cap,
+    to: to,
+    viaShortcut: viaShortcut,
+  };
+}
+
+async function performQuickLog(p) {
+  let all = await Reminder.all([cal]);
+  let mine =
+    all
+      .filter(
+        (r) =>
+          !isDataTitle(r.title || "") &&
+          parseMood(r.title || "").user.toLowerCase() ===
+            myUserName.toLowerCase(),
+      )
+      .sort((a, b) => getTime(b) - getTime(a))[0] || null;
+  let title = resolveQuickMood(p.spec, mine);
+  if (!title) return { ok: false, msg: 'No mood matches "' + p.spec + '"' };
+
+  let cap = Object.assign({}, p.cap);
+  let text = p.note;
+  let noReply = p.noReply;
+  let n = normName(p.spec);
+  // "last" with nothing else given = an exact repeat of my previous check-in
+  if (
+    ["last", "same", "same as last"].indexOf(n) !== -1 &&
+    mine &&
+    !p.note &&
+    !p.noReply &&
+    !Object.keys(p.cap).length
+  ) {
+    let ns = splitNotes(mine.notes);
+    text = ns.text;
+    noReply = ns.noReply;
+    cap = Object.assign({}, ns.cap);
+  }
+  let energy = energyOfTitle(title);
+  if (energy != null) cap.energy = energy;
+
+  // Default: every friend with sharing on; "to" (names) narrows it
+  let targets = defaultTargets();
+  if (p.to) {
+    let names = p.to.map((x) => String(x).trim().toLowerCase());
+    let picked = [];
+    circles.forEach((c, i) => {
+      if (names.indexOf(c.partner.toLowerCase()) !== -1) picked.push(i);
+    });
+    if (picked.length) targets = picked;
+  }
+  let n2 = await writeCheckins(targets, title, buildNotes(text, noReply, cap));
+  if (!n2) return { ok: false, msg: "No shared list found to log into" };
+  return {
+    ok: true,
+    msg:
+      "Logged " +
+      faceify(title) +
+      (targets.length > 1 ? " for " + targets.length + " friends" : ""),
+  };
 }
 
 // Edit sheet -> delete my latest check-in
-async function deleteCheckin() {
-  let r = myLatestReminderRef;
+async function deleteEntryFromUrl(url) {
+  let q = parseQuery(url || "");
+  let r = await findMyEntry(q.id);
   if (!r || typeof r.remove !== "function") return;
   await r.remove();
 }
@@ -1117,16 +2357,22 @@ async function scheduleCheckInReminder() {
       await Notification.removePending([REMINDER_ID]);
       return;
     }
-    let all = await Reminder.all([cal]);
+    let cals = circles.map((c) => findCalendar(c.list)).filter(Boolean);
+    let all = await Reminder.all(cals.length ? cals : [cal]);
     let latest = 0;
+    let latestMood = "";
     for (let r of all) {
       let title = r.title || "";
-      if (title.toLowerCase().includes("avatar")) continue;
+      if (isDataTitle(title)) continue;
       let p = parseMood(title);
       if (p.user.toLowerCase() !== myUserName.toLowerCase()) continue;
-      latest = Math.max(latest, getTime(r));
+      if (getTime(r) > latest) {
+        latest = getTime(r);
+        latestMood = p.mood;
+      }
     }
-    if (!latest) {
+    // No check-ins yet, or I'm resting: no nudges
+    if (!latest || isRestingMood(latestMood)) {
       await Notification.removePending([REMINDER_ID]);
       return;
     }
@@ -1186,6 +2432,258 @@ async function saveSettingsFromUrl(url) {
   fm.writeString(settingsPath, JSON.stringify(settings, null, 2));
 }
 
+// ---- Friends: writing to several lists, switching, adding, managing ----
+async function notify(title, msg) {
+  let a = new Alert();
+  a.title = title;
+  a.message = msg;
+  a.addAction("OK");
+  await a.present();
+}
+
+// "0,2" -> [0, 2] (valid, unique indices into circles)
+function parseTargets(csv) {
+  let out = [];
+  String(csv || "")
+    .split(",")
+    .forEach((x) => {
+      let i = parseInt(x, 10);
+      if (!isNaN(i) && i >= 0 && i < circles.length && out.indexOf(i) === -1)
+        out.push(i);
+    });
+  return out;
+}
+
+// Friends whose lists get my check-ins by default
+function defaultTargets() {
+  let t = [];
+  circles.forEach((c, i) => {
+    if (c.autoShare) t.push(i);
+  });
+  return t.length ? t : [activeCircle];
+}
+
+// Lists that also get my avatar and "what helps" cards (friends with sharing on)
+function shareCalendars() {
+  let out = [];
+  circles.forEach((c) => {
+    if (!c.autoShare) return;
+    let k = findCalendar(c.list);
+    if (k && out.indexOf(k) === -1) out.push(k);
+  });
+  return out;
+}
+
+// Writes one check-in into each chosen friend's list
+async function writeCheckins(indices, title, notes) {
+  let done = 0;
+  for (let i of indices) {
+    let c = circles[i];
+    if (!c) continue;
+    let k = findCalendar(c.list);
+    if (!k) continue;
+    let r = new Reminder();
+    r.title = "[" + myUserName + "] " + title;
+    r.notes = notes;
+    r.calendar = k;
+    await r.save();
+    done++;
+  }
+  return done;
+}
+
+async function switchCircleFromUrl(url) {
+  let q = parseQuery(url || "");
+  let i = parseInt(q.i, 10);
+  if (isNaN(i) || i < 0 || i >= circles.length || i === activeCircle) return;
+  if (!findCalendar(circles[i].list)) {
+    await notify(
+      'List "' + circles[i].list + '" not found',
+      "Open Reminders and check that the list exists and is shared with you.",
+    );
+    return;
+  }
+  activeCircle = i;
+  applyActiveCircle();
+  saveCircles();
+}
+
+// "Add a friend": connects to their list, or creates it if it doesn't exist yet
+async function addFriendFromUrl(url) {
+  let q = parseQuery(url || "");
+  let name = String(q.n || "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 40);
+  let listN = String(q.l || "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 80);
+  if (!name || !listN) return;
+  if (name.toLowerCase() === myUserName.toLowerCase()) {
+    await notify("That's you", "Use your friend's name here, not your own.");
+    return;
+  }
+  let existing = circles.findIndex(
+    (c) => c.partner.toLowerCase() === name.toLowerCase(),
+  );
+  if (existing !== -1) {
+    activeCircle = existing;
+    applyActiveCircle();
+    saveCircles();
+    return;
+  }
+  let k = findCalendar(listN);
+  let created = false;
+  if (!k) {
+    try {
+      k = await Calendar.createForReminders(listN);
+      calendars = await Calendar.forReminders();
+      created = true;
+    } catch (e) {
+      await notify(
+        "Could not create the list",
+        'Create a list named "' +
+          listN +
+          '" in the Reminders app (under iCloud), share it, then add it here again.',
+      );
+      return;
+    }
+  }
+  circles.push({ partner: name, list: listN, autoShare: true });
+  activeCircle = circles.length - 1;
+  applyActiveCircle();
+  saveCircles();
+  await notify(
+    created ? "List created" : "Connected",
+    created
+      ? 'Next: open the Reminders app, open "' +
+          listN +
+          '", tap the people icon (or ⓘ) and share it with ' +
+          name +
+          ". On their phone they add you here using the same list name. If Reminders won't let you share it, create the list there under iCloud instead and add it here by name."
+      : 'Using the existing list "' +
+          listN +
+          '". Make sure ' +
+          name +
+          " has access to it.",
+  );
+}
+
+// Friends sheet -> sharing switches and removals (removing only forgets the friend in this app)
+async function saveFriendsFromUrl(url) {
+  let q = parseQuery(url || "");
+  let flags = String(q.s || "").split(",");
+  if (flags.length !== circles.length) return;
+  let del = String(q.d || "")
+    .split(",")
+    .filter((x) => x !== "")
+    .map((x) => parseInt(x, 10));
+  if (del.some((i) => isNaN(i) || i < 0 || i >= circles.length)) return;
+  if (del.length >= circles.length) return; // keep at least one friend
+  let activePartner = circles[activeCircle].partner;
+  let kept = [];
+  circles.forEach((c, i) => {
+    if (del.indexOf(i) !== -1) return;
+    kept.push({
+      partner: c.partner,
+      list: c.list,
+      autoShare: flags[i] === "1",
+    });
+  });
+  circles = kept;
+  let idx = circles.findIndex((c) => c.partner === activePartner);
+  activeCircle = idx === -1 ? 0 : idx;
+  applyActiveCircle();
+  saveCircles();
+}
+
+// ---- Async Love: tiny "no reply needed" notes of support ----
+// Stored as a "Love: <Sender>" reminder (JSON in notes). There are no read receipts and
+// nothing is sent to the other phone: they see it next time they open the app or widget.
+const LOVE_PREFIX = "Love: ";
+const DAY_MS = 24 * 60 * 60 * 1000;
+const LOVE_MAX_PER_DAY = 3;
+const LOVE_KINDS = {
+  hug: ["🤗", "Sending you a hug"],
+  tea: ["🍵", "Thinking of you"],
+  candle: ["🕯️", "Here if you want me. No pressure."],
+  moon: ["🌙", "Rest well"],
+  seed: ["🌱", "No need to do anything"],
+};
+const loveHiddenPath = fm.joinPath(
+  fm.documentsDirectory(),
+  "mood_love_hidden.json",
+);
+
+function parseLove(r) {
+  let title = String((r && r.title) || "").trim();
+  if (!title.toLowerCase().startsWith("love:")) return null;
+  try {
+    let o = JSON.parse(r.notes || "{}");
+    return {
+      r: r,
+      id: r.identifier || "",
+      from: title.slice(5).trim(),
+      to: String(o.to || ""),
+      kind: String(o.k || ""),
+      note: String(o.n || "").slice(0, 80),
+      t: getTime(r),
+    };
+  } catch (e) {
+    return null;
+  }
+}
+
+// Notes I chose to hide (stored only on this phone: the sender never knows)
+function loadHiddenLove() {
+  try {
+    if (fm.fileExists(loveHiddenPath)) {
+      let a = JSON.parse(fm.readString(loveHiddenPath));
+      if (Array.isArray(a)) return a.map(String);
+    }
+  } catch (e) {}
+  return [];
+}
+
+async function hideLoveFromUrl(url) {
+  let q = parseQuery(url || "");
+  let id = String(q.id || "");
+  if (!id) return;
+  let h = loadHiddenLove();
+  if (h.indexOf(id) === -1) h.push(id);
+  fm.writeString(loveHiddenPath, JSON.stringify(h.slice(-200)));
+}
+
+async function saveLoveFromUrl(url) {
+  let q = parseQuery(url || "");
+  let kind = String(q.k || "");
+  if (!LOVE_KINDS[kind] || !cal) return;
+  let note = String(q.n || "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 80);
+  let all = await Reminder.all([cal]);
+  let now = Date.now();
+  let me = myUserName.toLowerCase();
+  let mine = all.map(parseLove).filter((l) => l && l.from.toLowerCase() === me);
+  // Housekeeping: my notes older than 14 days are removed from the list
+  for (let l of mine) {
+    if (now - l.t > 14 * DAY_MS && typeof l.r.remove === "function") {
+      try {
+        await l.r.remove();
+      } catch (e) {}
+    }
+  }
+  // A gentle daily limit keeps this a comfort, not a pressure
+  if (mine.filter((l) => now - l.t < DAY_MS).length >= LOVE_MAX_PER_DAY) return;
+  let r = new Reminder();
+  r.title = LOVE_PREFIX + myUserName;
+  r.notes = JSON.stringify({ to: partnerUserName, k: kind, n: note });
+  r.calendar = cal;
+  await r.save();
+}
+
 function saveMoodPresets() {
   fm.writeString(configPath, JSON.stringify(moods, null, 2));
 }
@@ -1236,11 +2734,13 @@ async function saveManageFromUrl(url) {
 
 async function showMissingListAlert() {
   let a = new Alert();
-  a.title = 'List "' + listName + '" not found';
+  a.title = 'List "' + circles[activeCircle].list + '" not found';
   a.message =
     'Create a Reminders list named "' +
-    listName +
-    '" (shared with your partner) and run this again. ' +
+    circles[activeCircle].list +
+    '" (shared with ' +
+    circles[activeCircle].partner +
+    ") and run this again. " +
     "Nothing was written to your other lists.";
   a.addAction("OK");
   await a.present();
@@ -1297,13 +2797,24 @@ async function runDashboard() {
       pendingUrl = url;
       return false;
     }
+    if (url.indexOf("localhost/saveSame") !== -1) {
+      pending = "saveSame";
+      pendingUrl = url;
+      return false;
+    }
+    if (url.indexOf("localhost/saveHelps") !== -1) {
+      pending = "saveHelps";
+      pendingUrl = url;
+      return false;
+    }
     if (url.indexOf("localhost/saveEdit") !== -1) {
       pending = "saveEdit";
       pendingUrl = url;
       return false;
     }
-    if (url.indexOf("localhost/deleteCheckin") !== -1) {
-      pending = "deleteCheckin";
+    if (url.indexOf("localhost/deleteEntry") !== -1) {
+      pending = "deleteEntry";
+      pendingUrl = url;
       return false;
     }
     if (url.indexOf("localhost/saveSettings") !== -1) {
@@ -1317,6 +2828,31 @@ async function runDashboard() {
     }
     if (url.indexOf("localhost/changeAvatar") !== -1) {
       pending = "changeAvatar";
+      return false;
+    }
+    if (url.indexOf("localhost/saveLove") !== -1) {
+      pending = "saveLove";
+      pendingUrl = url;
+      return false;
+    }
+    if (url.indexOf("localhost/hideLove") !== -1) {
+      pending = "hideLove";
+      pendingUrl = url;
+      return false;
+    }
+    if (url.indexOf("localhost/switch") !== -1) {
+      pending = "switch";
+      pendingUrl = url;
+      return false;
+    }
+    if (url.indexOf("localhost/addFriend") !== -1) {
+      pending = "addFriend";
+      pendingUrl = url;
+      return false;
+    }
+    if (url.indexOf("localhost/saveFriends") !== -1) {
+      pending = "saveFriends";
+      pendingUrl = url;
       return false;
     }
     if (url.indexOf("localhost/refresh") !== -1) {
@@ -1342,11 +2878,18 @@ async function runDashboard() {
       if (action === "saveMood") await saveMoodFromUrl(actionUrl);
       if (action === "saveCustom") await saveCustomFromUrl(actionUrl);
       if (action === "saveManage") await saveManageFromUrl(actionUrl);
+      if (action === "saveSame") await saveSameFromUrl(actionUrl);
+      if (action === "saveHelps") await saveHelpsFromUrl(actionUrl);
       if (action === "saveEdit") await saveEditFromUrl(actionUrl);
-      if (action === "deleteCheckin") await deleteCheckin();
+      if (action === "deleteEntry") await deleteEntryFromUrl(actionUrl);
       if (action === "saveSettings") await saveSettingsFromUrl(actionUrl);
       if (action === "testReminder") await sendTestReminder();
       if (action === "changeAvatar") await changeMyAvatar();
+      if (action === "saveLove") await saveLoveFromUrl(actionUrl);
+      if (action === "hideLove") await hideLoveFromUrl(actionUrl);
+      if (action === "switch") await switchCircleFromUrl(actionUrl);
+      if (action === "addFriend") await addFriendFromUrl(actionUrl);
+      if (action === "saveFriends") await saveFriendsFromUrl(actionUrl);
       // Keep the "you haven't checked in" notification in step with whatever just changed
       await scheduleCheckInReminder();
       // "refresh" has no action of its own: the reload below is the refresh
@@ -1363,7 +2906,24 @@ async function runDashboard() {
 if (!cal) {
   await showMissingListAlert();
 } else {
-  await runDashboard();
+  let quick = readQuickParams();
+  let skipDashboard = false;
+  if (quick) {
+    let res = await performQuickLog(quick);
+    await scheduleCheckInReminder();
+    if (quick.viaShortcut) {
+      // Run from Shortcuts / Back Tap / Action Button: log silently, no UI
+      Script.setShortcutOutput(res.msg);
+      skipDashboard = true;
+    } else if (!res.ok) {
+      let a = new Alert();
+      a.title = "Quick log";
+      a.message = res.msg;
+      a.addAction("OK");
+      await a.present();
+    }
+  }
+  if (!skipDashboard) await runDashboard();
 }
 
 Script.complete();
