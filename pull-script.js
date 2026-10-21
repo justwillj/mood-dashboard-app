@@ -1,17 +1,22 @@
 // Variables used by Scriptable.
 // These must be at the very top of the file. Do not edit.
 // icon-color: deep-blue; icon-glyph: magic;
-// Variables used by Scriptable.
-// These must be at the very top of the file. Do not edit.
-// icon-color: deep-blue; icon-glyph: magic;
 // ==========================================
-// GITHUB SYNC (FIXED ITEM ITERATION & SETUP)
+// MOOD APP INSTALLER & GITHUB SYNC
 // ==========================================
 
 const githubUser = "justwillj";
 const repoName = "mood-dashboard-app";
 const branch = "main";
 const targetFolder = "scripts";
+
+// Known scripts fallback in case GitHub API hits rate limits
+const FALLBACK_SCRIPTS = [
+  "mood-core.js",
+  "mood-dashboard.js",
+  "mood-homescreen-widget.js",
+  "mood-lockscreen-widget.js",
+];
 
 let fm = FileManager.iCloud();
 try {
@@ -24,18 +29,21 @@ const userConfigPath = fm.joinPath(fm.documentsDirectory(), "user_config.json");
 const circlesPath = fm.joinPath(fm.documentsDirectory(), "mood_circles.json");
 
 async function runSync() {
-  if (!fm.fileExists(userConfigPath)) {
+  let isFirstTime = !fm.fileExists(userConfigPath);
+
+  if (isFirstTime) {
     let success = await promptForNames(
-      "Mood Dashboard Setup",
-      "Enter your names and the shared Reminders list name below:",
+      "Welcome to Mood Dashboard",
+      "Let's get you set up! Enter your details below:",
     );
     if (!success) return;
   } else {
     let menuAlert = new Alert();
-    menuAlert.title = "Dashboard Manager";
-    menuAlert.message = "Choose an action:";
-    menuAlert.addAction("🔄 Sync Scripts from GitHub");
+    menuAlert.title = "Mood App Manager";
+    menuAlert.message = "Choose an option:";
+    menuAlert.addAction("🔄 Update Scripts from GitHub");
     menuAlert.addAction("✏️ Change Setup (Names & List)");
+    menuAlert.addAction("🚀 Launch Dashboard");
     menuAlert.addCancelAction("Cancel");
 
     let choice = await menuAlert.presentAlert();
@@ -43,77 +51,76 @@ async function runSync() {
     if (choice === 1) {
       let success = await promptForNames(
         "Update Setup",
-        "Update your names and list below:",
+        "Update your names or shared list below:",
       );
       if (!success) return;
+    } else if (choice === 2) {
+      Safari.open("scriptable:///run/" + encodeURIComponent("mood-dashboard"));
+      return;
     }
   }
 
-  // GitHub API endpoint for the folder contents
-  let apiUrl =
-    "https://api.github.com/repos/" +
-    githubUser +
-    "/" +
-    repoName +
-    "/contents/" +
-    targetFolder +
-    "?ref=" +
-    branch +
-    "&t=" +
-    Date.now();
+  // --- DOWNLOAD SCRIPTS ---
+  let downloadList = [];
+  let apiUrl = `https://api.github.com/repos/${githubUser}/${repoName}/contents/${targetFolder}?ref=${branch}&t=${Date.now()}`;
 
   try {
     let req = new Request(apiUrl);
     req.headers = { "User-Agent": "Scriptable-AutoSync" };
-
     let responseText = await req.loadString();
     let items = JSON.parse(responseText);
 
-    if (!Array.isArray(items)) {
-      throw new Error(
-        "Could not read directory contents. Response was not an array. Check repo visibility or folder name.",
-      );
+    if (Array.isArray(items)) {
+      downloadList = items
+        .filter((item) => item.name && item.name.endsWith(".js"))
+        .map((item) => ({
+          name: item.name,
+          url:
+            item.download_url ||
+            `https://raw.githubusercontent.com/${githubUser}/${repoName}/${branch}/${targetFolder}/${item.name}?t=${Date.now()}`,
+        }));
     }
+  } catch (err) {
+    console.log("GitHub API unavailable or rate-limited. Using fallback list.");
+  }
 
+  // Fallback if GitHub API failed (e.g. cellular IP rate limit)
+  if (downloadList.length === 0) {
+    downloadList = FALLBACK_SCRIPTS.map((filename) => ({
+      name: filename,
+      url: `https://raw.githubusercontent.com/${githubUser}/${repoName}/${branch}/${targetFolder}/${filename}?t=${Date.now()}`,
+    }));
+  }
+
+  try {
     let syncedCount = 0;
 
-    for (let i = 0; i < items.length; i++) {
-      let item = items[i];
+    for (let script of downloadList) {
+      let fileReq = new Request(script.url);
+      let content = await fileReq.loadString();
 
-      // Check if it's a JavaScript file
-      if (item.name && item.name.endsWith(".js")) {
-        // Construct standard raw download URL dynamically if download_url is missing
-        let downloadUrl =
-          item.download_url ||
-          `https://raw.githubusercontent.com/${githubUser}/${repoName}/${branch}/${targetFolder}/${item.name}?t=${Date.now()}`;
-
-        let fileReq = new Request(downloadUrl);
-        let scriptContent = await fileReq.loadString();
-
-        if (scriptContent && scriptContent.trim().length > 0) {
-          let filePath = fm.joinPath(fm.documentsDirectory(), item.name);
-
-          // Write fresh content to local disk
-          fm.writeString(filePath, scriptContent);
-
-          if (fm.isFileStoredIniCloud && fm.isFileStoredIniCloud(filePath)) {
-            try {
-              await fm.downloadFileFromiCloud(filePath);
-            } catch (err) {}
-          }
-
-          syncedCount++;
-          console.log("Successfully synced: " + item.name);
-        }
+      if (content && content.trim().length > 0) {
+        let filePath = fm.joinPath(fm.documentsDirectory(), script.name);
+        fm.writeString(filePath, content);
+        syncedCount++;
+        console.log("Successfully synced: " + script.name);
       }
     }
 
+    // Success alert with immediate launch option
     let alert = new Alert();
-    alert.title = "Sync Successful!";
-    alert.message =
-      "Successfully updated " + syncedCount + " script(s) from GitHub.";
-    alert.addAction("OK");
-    await alert.present();
+    alert.title = isFirstTime ? "Setup Complete! 🎉" : "Sync Successful! 🔄";
+    alert.message = isFirstTime
+      ? `Successfully installed ${syncedCount} scripts.\n\nNext steps:\n1. Open Apple Reminders & share your list with your partner.\n2. Tap below to launch your dashboard!`
+      : `Successfully updated ${syncedCount} script(s) from GitHub.`;
+
+    alert.addAction("🚀 Open Dashboard");
+    alert.addCancelAction("Done");
+
+    let choice = await alert.presentAlert();
+    if (choice === 0) {
+      Safari.open("scriptable:///run/" + encodeURIComponent("mood-dashboard"));
+    }
   } catch (error) {
     let alert = new Alert();
     alert.title = "Sync Failed";
@@ -127,6 +134,7 @@ async function promptForNames(title, message) {
   let existingMyName = "";
   let existingPartnerName = "";
   let existingListName = "Mood Dashboard";
+  let existingTheme = "forest";
 
   if (fm.fileExists(userConfigPath)) {
     try {
@@ -135,6 +143,7 @@ async function promptForNames(title, message) {
       existingPartnerName =
         cfg.partnerUserName === "Partner" ? "" : cfg.partnerUserName || "";
       existingListName = cfg.listName || "Mood Dashboard";
+      existingTheme = cfg.theme || "forest";
     } catch (e) {}
   }
 
@@ -143,8 +152,8 @@ async function promptForNames(title, message) {
   setupAlert.message = message;
   setupAlert.addTextField("Your Name (e.g. Dylan)", existingMyName);
   setupAlert.addTextField("Partner Name (e.g. Will)", existingPartnerName);
-  setupAlert.addTextField("Shared List Name", existingListName);
-  setupAlert.addAction("Save");
+  setupAlert.addTextField("Shared Reminders List", existingListName);
+  setupAlert.addAction("Save & Continue");
   setupAlert.addCancelAction("Cancel");
 
   let res = await setupAlert.presentAlert();
@@ -154,13 +163,44 @@ async function promptForNames(title, message) {
   let partnerName = setupAlert.textFieldValue(1).trim() || "Partner";
   let lstName = setupAlert.textFieldValue(2).trim() || "Mood Dashboard";
 
+  // Check / Auto-Create the Apple Reminders list
+  try {
+    let calendars = await Calendar.forReminders();
+    let found = calendars.find(
+      (c) => c.title.trim().toLowerCase() === lstName.toLowerCase(),
+    );
+
+    if (!found) {
+      let createAlert = new Alert();
+      createAlert.title = "List Not Found";
+      createAlert.message = `The Reminders list "${lstName}" does not exist yet. Would you like to create it now in iCloud?`;
+      createAlert.addAction("Create List");
+      createAlert.addCancelAction("I'll do it manually");
+
+      let createChoice = await createAlert.presentAlert();
+      if (createChoice === 0) {
+        try {
+          await Calendar.createForReminders(lstName);
+          console.log(`Created Reminders list: ${lstName}`);
+        } catch (err) {
+          console.log("Could not auto-create list: " + err.message);
+        }
+      }
+    }
+  } catch (permErr) {
+    console.log("Reminders permission check skipped: " + permErr.message);
+  }
+
+  // Save user_config.json with default forest theme
   let configData = {
     myUserName: myName,
     partnerUserName: partnerName,
     listName: lstName,
+    theme: existingTheme,
   };
   fm.writeString(userConfigPath, JSON.stringify(configData, null, 2));
 
+  // Save mood_circles.json
   let circlesData = { circles: [], active: 0 };
   if (fm.fileExists(circlesPath)) {
     try {
