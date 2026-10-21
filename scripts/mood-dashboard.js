@@ -4,6 +4,9 @@
 // Variables used by Scriptable.
 // These must be at the very top of the file. Do not edit.
 // icon-color: purple; icon-glyph: chart-line;
+// Variables used by Scriptable.
+// These must be at the very top of the file. Do not edit.
+// icon-color: purple; icon-glyph: chart-line;
 // ==========================================
 // MOOD DASHBOARD (REDESIGNED LAYOUT & SAFE AVATAR SYNC)
 // ==========================================
@@ -17,6 +20,69 @@ try {
 
 const userConfigPath = fm.joinPath(fm.documentsDirectory(), "user_config.json");
 
+// --- THEME PALETTES ---
+const THEMES = {
+  forest: {
+    id: "forest",
+    name: "Forest & Sage",
+    bg: "#121915",
+    card: "#1B241F",
+    cardSec: "#161D19",
+    heroMe: "#1A2620",
+    heroPartner: "#241D1A",
+    accentMe: "#8DA399",
+    accentPartner: "#D97757",
+    dots: "#E0A96D",
+    text: "#F4F1EA",
+    textDim: "#A3ADA7",
+    textSub: "#75827A",
+    border: "rgba(167, 196, 181, 0.15)",
+    borderPartner: "rgba(217, 119, 87, 0.3)",
+    btnPrimary: "#4F6D60",
+    btnPrimaryBorder: "#628576",
+  },
+  sand: {
+    id: "sand",
+    name: "Warm Sand & Clay",
+    bg: "#181513",
+    card: "#231F1C",
+    cardSec: "#1D1916",
+    heroMe: "#26211C",
+    heroPartner: "#281D1A",
+    accentMe: "#D69F54",
+    accentPartner: "#C26D53",
+    dots: "#E7B068",
+    text: "#F5EDE4",
+    textDim: "#A89F96",
+    textSub: "#7B736B",
+    border: "rgba(214, 159, 84, 0.15)",
+    borderPartner: "rgba(194, 109, 83, 0.38)",
+    btnPrimary: "#7E5835",
+    btnPrimaryBorder: "#966B43",
+  },
+  midnight: {
+    id: "midnight",
+    name: "Midnight Neon",
+    bg: "#0B0C10",
+    card: "#1E1F29",
+    cardSec: "#171821",
+    heroMe: "rgba(255,255,255,0.08)",
+    heroPartner: "rgba(255,255,255,0.08)",
+    accentMe: "#818CF8",
+    accentPartner: "#F472B6",
+    dots: "#00E5FF",
+    text: "#FFFFFF",
+    textDim: "rgba(255,255,255,0.6)",
+    textSub: "rgba(255,255,255,0.45)",
+    border: "rgba(255,255,255,0.12)",
+    borderPartner: "rgba(236,72,153,0.3)",
+    btnPrimary: "#6366F1",
+    btnPrimaryBorder: "#6366F1",
+  },
+};
+
+let currentTheme = "forest"; // Default theme
+
 let myUserName = "You";
 let partnerUserName = "Partner";
 let listName = "Mood Dashboard";
@@ -27,8 +93,36 @@ if (fm.fileExists(userConfigPath)) {
     myUserName = (config.myUserName || "You").trim();
     partnerUserName = (config.partnerUserName || "Partner").trim();
     listName = (config.listName || "Mood Dashboard").trim();
+    if (config.theme && THEMES[config.theme]) {
+      currentTheme = config.theme;
+    }
   } catch (e) {
     console.log("Could not read user_config.json, using defaults.");
+  }
+}
+
+// Active theme shortcut
+let activeTheme = THEMES[currentTheme] || THEMES.forest;
+
+async function toggleThemeFromUrl() {
+  const themeOrder = ["forest", "sand", "midnight"];
+  let nextIdx = (themeOrder.indexOf(currentTheme) + 1) % themeOrder.length;
+  currentTheme = themeOrder[nextIdx];
+  activeTheme = THEMES[currentTheme];
+
+  // Save to user_config.json so widgets can also read it
+  try {
+    let cfg = {};
+    if (fm.fileExists(userConfigPath)) {
+      cfg = JSON.parse(fm.readString(userConfigPath)) || {};
+    }
+    cfg.myUserName = myUserName;
+    cfg.partnerUserName = partnerUserName;
+    cfg.listName = listName;
+    cfg.theme = currentTheme;
+    fm.writeString(userConfigPath, JSON.stringify(cfg, null, 2));
+  } catch (e) {
+    console.log("Failed to save theme: " + e.message);
   }
 }
 
@@ -132,7 +226,6 @@ function loadCircles() {
       console.log("Could not read mood_circles.json, using defaults.");
     }
   }
-  // First run (or unreadable file): one friend, from user_config.json
   if (!list.length)
     list = [{ partner: partnerUserName, list: listName, autoShare: true }];
   circles = list;
@@ -147,7 +240,6 @@ function saveCircles() {
 }
 
 let cal = null;
-// Points the whole dashboard at the active friend's list and name
 function applyActiveCircle() {
   partnerUserName = circles[activeCircle].partner;
   cal = findCalendar(circles[activeCircle].list);
@@ -156,7 +248,6 @@ function applyActiveCircle() {
 loadCircles();
 applyActiveCircle();
 
-// Widgets open the dashboard with ?friend=<Name> so it lands on the same friend
 {
   let fq = args.queryParameters && args.queryParameters.friend;
   if (fq) {
@@ -170,10 +261,7 @@ applyActiveCircle();
     }
   }
 }
-// NOTE: no fallback to the default Reminders list. If the list is missing,
-// the script stops with a message instead (see bottom of file).
 
-// Helper to extract the direct Base64 Data URI from reminder notes
 function getAvatarBase64FromNotes(reminder) {
   if (
     !reminder ||
@@ -185,19 +273,16 @@ function getAvatarBase64FromNotes(reminder) {
   return reminder.notes;
 }
 
-// Avatar reminders are titled exactly "<Name> Avatar" (case-insensitive)
 function isAvatarFor(reminder, name) {
   let title = ((reminder && reminder.title) || "").trim().toLowerCase();
   return title === (name + " avatar").trim().toLowerCase();
 }
 
-// Function to safely pick photo, center-crop, compress, and update avatar reminder notes
 async function changeMyAvatar() {
   try {
     let img = await Photos.fromLibrary();
-    if (!img) return; // User cancelled, exit safely
+    if (!img) return;
 
-    // Center-crop to a square so non-square photos aren't squashed
     const AVATAR_PX = 180;
     let side = Math.min(img.size.width, img.size.height);
     let scale = AVATAR_PX / side;
@@ -207,7 +292,7 @@ async function changeMyAvatar() {
     let dc = new DrawContext();
     dc.size = new Size(AVATAR_PX, AVATAR_PX);
     dc.opaque = true;
-    dc.respectScreenScale = false; // true pixel size = smaller note payload
+    dc.respectScreenScale = false;
     dc.drawImageInRect(
       img,
       new Rect((AVATAR_PX - drawW) / 2, (AVATAR_PX - drawH) / 2, drawW, drawH),
@@ -216,7 +301,6 @@ async function changeMyAvatar() {
     let jpegData = Data.fromJPEG(processedImg);
     let base64String = "data:image/jpeg;base64," + jpegData.toBase64String();
 
-    // Saved into every shared list that has sharing switched on
     for (let k of shareCalendars()) {
       let allReminders = await Reminder.all([k]);
       let myAvatarReminder = allReminders.find((r) =>
@@ -284,14 +368,26 @@ function parseMood(title) {
 }
 
 // ---- Conventions stored in the shared Reminders list ----
-// Last line of a check-in's notes when "no reply needed" is switched on
 const NO_REPLY_MARK = "🔕 No reply needed";
-// Built-in "no check-ins needed" mood (works on both phones, no preset required)
 const REST_TITLE = "🌙 Resting";
-// A "Helps: <Name>" reminder holds that person's "what helps" cards as JSON in its notes
+const CAP_MARK = "📊";
+const NEED_MARK = "🤝 Need:";
+const EDIT_MARK = "✏️ Edited:";
+const NEEDS = {
+  space: { icon: "🎧", full: "🎧 Space & quiet" },
+  parallel: { icon: "🛋️", full: "🛋️ Parallel play (no talking)" },
+  distract: { icon: "💬", full: "💬 Distraction / memes" },
+  comfort: { icon: "🫂", full: "🫂 Comfort & warmth" },
+  advice: { icon: "💡", full: "💡 Advice wanted" },
+};
+
+function needPillHtml(need) {
+  if (!need || !NEEDS[need]) return "";
+  return '<div class="need-pill">' + esc(NEEDS[need].full) + "</div>";
+}
+
 const HELPS_PREFIX = "Helps: ";
 
-// Reminders that store data (avatars, help cards) rather than a mood check-in
 function isDataTitle(title) {
   let t = String(title || "")
     .toLowerCase()
@@ -307,11 +403,6 @@ function isRestingMood(mood) {
     .toLowerCase()
     .startsWith("🌙 resting");
 }
-
-// ---- Capacity line: "📊 Energy 3/5 · Social 2/5 · Sensory 4/5 · Talk: text" ----
-// Stored on its own line in a check-in's notes. Energy is written with every check-in so
-// trends stay accurate even for moods that aren't in the other phone's preset list.
-const CAP_MARK = "📊";
 
 function parseCapLine(line) {
   let cap = {};
@@ -341,38 +432,50 @@ function formatCapLine(cap) {
   return parts.length ? CAP_MARK + " " + parts.join(" · ") : "";
 }
 
-// Splits a reminder's notes into the visible note, the capacity values and the "no reply needed" flag
 function splitNotes(raw) {
   let keep = [];
   let noReply = false;
   let cap = {};
+  let need = null;
+  let editedDate = null;
+
   String(raw || "")
     .split("\n")
     .forEach((line) => {
       let l = line.trim();
-      if (l === NO_REPLY_MARK) noReply = true;
-      else if (l.startsWith(CAP_MARK)) cap = parseCapLine(l);
-      else if (l) keep.push(l);
+      if (l === NO_REPLY_MARK) {
+        noReply = true;
+      } else if (l.startsWith(CAP_MARK)) {
+        cap = parseCapLine(l);
+      } else if (l.startsWith(NEED_MARK)) {
+        need = l.replace(NEED_MARK, "").trim().toLowerCase();
+      } else if (l.startsWith(EDIT_MARK)) {
+        let parsed = new Date(l.replace(EDIT_MARK, "").trim());
+        if (!isNaN(parsed.getTime())) editedDate = parsed;
+      } else if (l) {
+        keep.push(l);
+      }
     });
-  return { text: keep.join(" "), noReply: noReply, cap: cap };
+
+  return { text: keep.join(" "), noReply, cap, need, editedDate };
 }
 
-// Builds notes text: note, then the capacity line, then the "no reply needed" marker
-function buildNotes(text, noReply, cap) {
+function buildNotes(text, noReply, cap, need, editedDate) {
   let clean = String(text || "")
     .split("\n")
     .map((l) => l.trim())
-    .filter((l) => l && l !== NO_REPLY_MARK && !l.startsWith(CAP_MARK))
+    .filter((l) => l && l !== NO_REPLY_MARK && !l.startsWith(CAP_MARK) && !l.startsWith(NEED_MARK) && !l.startsWith(EDIT_MARK))
     .join(" ");
   let lines = [];
   if (clean) lines.push(clean);
+  if (need) lines.push(NEED_MARK + " " + need);
   let capLine = formatCapLine(cap);
   if (capLine) lines.push(capLine);
+  if (editedDate) lines.push(EDIT_MARK + " " + new Date(editedDate).toISOString());
   if (noReply) lines.push(NO_REPLY_MARK);
   return lines.join("\n");
 }
 
-// social / sensory / talk from "?soc=2&sen=4&talk=text" style values
 function capFromQuery(q) {
   let cap = {};
   let soc = parseInt(q.soc, 10);
@@ -383,7 +486,6 @@ function capFromQuery(q) {
   return cap;
 }
 
-// Energy (1-5) of one of MY presets by exact title; null for Resting / unknown
 function energyOfTitle(title) {
   if (isRestingMood(title)) return null;
   let key = String(title || "")
@@ -430,8 +532,7 @@ function capChipsHtml(cap) {
     : "";
 }
 
-// ---- Trends (per day, from check-ins) ----
-const LOW_ENERGY = 2; // a day averaging 2 or below counts as a low-energy day
+const LOW_ENERGY = 2;
 
 function dayKey(d) {
   return d.getFullYear() + "-" + d.getMonth() + "-" + d.getDate();
@@ -443,7 +544,6 @@ function round1(n) {
   return n == null ? null : Math.round(n * 10) / 10;
 }
 
-// One entry per check-in by this person: { t, energy, resting, social, sensory, talk }
 function collectEntries(list, userName) {
   let out = [];
   for (let r of list) {
@@ -467,7 +567,6 @@ function collectEntries(list, userName) {
   return out;
 }
 
-// Daily summary for the last R days, the R days before that, and a "low lately" alert (last 7 days)
 function summarizeTrend(entries, R) {
   let groups = {};
   entries.forEach((e) => {
@@ -505,7 +604,6 @@ function summarizeTrend(entries, R) {
 
   let low7 = lowOf(last7);
   let withE7 = withE(last7).length;
-  // Alert: low on 3+ of the last 7 days AND on at least 60% of the days that have an energy reading
   let alert =
     low7 >= 3 && withE7 > 0 && low7 >= 0.6 * withE7
       ? { low: low7, days: 7 }
@@ -539,7 +637,6 @@ function isHelpsFor(reminder, name) {
   return t === (HELPS_PREFIX + name).trim().toLowerCase();
 }
 
-// "What helps" cards: [{ m: mood title, or "*" for general, t: text }]
 function sanitizeHelps(list) {
   let out = [];
   let seen = {};
@@ -567,7 +664,6 @@ function parseHelps(reminder) {
   }
 }
 
-// Display-only: same face swap the widgets use. Stored reminder titles are never changed.
 function faceify(text) {
   return String(text || "")
     .replace(/🟢/g, "😤")
@@ -578,7 +674,6 @@ function faceify(text) {
     .trim();
 }
 
-// Compact relative time for the hero cards ("Just now", "5m ago", "3h ago", "2d ago")
 function relTime(d) {
   if (!d) return "--";
   let sec = Math.floor((Date.now() - new Date(d).getTime()) / 1000);
@@ -596,7 +691,6 @@ function isStale(d) {
   return d ? Date.now() - new Date(d).getTime() > 24 * 3600 * 1000 : false;
 }
 
-// Energy level for a mood, looked up from the presets (exact match first)
 function energyFor(mood) {
   let m = String(mood || "")
     .trim()
@@ -623,7 +717,6 @@ let trendState = { names: ["", ""], me: {}, partner: {} };
 let entriesState = {};
 let loveState = { sent: 0, max: 3, to: "" };
 
-// ---- MOCK DATA GENERATOR ----
 function buildMockData() {
   let now = new Date();
   let moodPool = [
@@ -679,9 +772,6 @@ function buildMockData() {
   return out;
 }
 
-// Builds the page script for the bottom sheets (Log Mood, Custom Mood, Manage Moods).
-// Sheets run inside the WebView and submit by navigating to http://localhost/<route>?...,
-// which Scriptable intercepts (saveMood, saveCustom, saveManage).
 function buildSheetJs() {
   let sheetMoods = moods.map((m) => {
     let t = faceify(m.title);
@@ -704,12 +794,12 @@ function buildSheetJs() {
   let safe = (o) => JSON.stringify(o).replace(/</g, "\\u003c");
   let json = safe(sheetMoods);
 
-  // Info about my current check-in (for the Edit sheet)
   let mine = {
     has: false,
     mood: "",
     note: "",
     nr: false,
+    need: "",
     cap: [0, 0, 0],
     time: "",
     idx: -1,
@@ -723,6 +813,7 @@ function buildSheetJs() {
       mood: faceify(mp.mood),
       note: ns.text,
       nr: ns.noReply,
+      need: ns.need || "",
       cap: [
         ns.cap.social || 0,
         ns.cap.sensory || 0,
@@ -730,7 +821,6 @@ function buildSheetJs() {
       ],
       id: myLatestReminderRef.identifier || "",
       time: relTime(myLatestReminderRef.creationDate),
-      // -2 = the built-in Resting status
       idx: isRestingMood(mp.mood)
         ? -2
         : moods.findIndex((m) => String(m.title).trim().toLowerCase() === key),
@@ -792,6 +882,20 @@ var fDel = [];
 var fListEdited = false;
 var loveSel = "";
 var nr = [false, false];
+var needSel = ["", ""];
+var NEED_KEYS = ["space", "parallel", "distract", "comfort", "advice"];
+var NEED_LABELS = ["🎧 Space & quiet", "🛋️ Parallel play", "💬 Distraction", "🫂 Comfort", "💡 Advice"];
+
+function renderNeeds(w) {
+  for (var i = 0; i < NEED_KEYS.length; i++) {
+    var el = $("need_" + w + "_" + NEED_KEYS[i]);
+    if (el) el.className = (needSel[w] === NEED_KEYS[i]) ? "nchip sel" : "nchip";
+  }
+}
+function setNeed(w, k) {
+  needSel[w] = (needSel[w] === k) ? "" : k;
+  renderNeeds(w);
+}
 var CAPW = [[0, 0, 0], [0, 0, 0]];
 var capShown = [false, false];
 var tWho = 1;
@@ -833,7 +937,6 @@ function chipsHtml(prefix, handler) {
 }
 
 function initSheet() {
-  // Log Mood + Edit tiles
   var emptyMsg = '<div class="sheet-empty">No moods yet. Close this and tap Custom Mood to add one.</div>';
   $("moodGrid").innerHTML = chipsHtml("chip_", "pick") + (MOODS.length ? "" : emptyMsg);
   $("editGrid").innerHTML = chipsHtml("echip_", "pickEdit") + (MOODS.length ? "" : emptyMsg);
@@ -846,7 +949,6 @@ function initSheet() {
   $("capHost1").innerHTML = capHtml(1);
   $("tw0l").textContent = TREND.names[0];
   $("tw1l").textContent = TREND.names[1];
-  // Reminders: hour options + quiet-hour selects
   var rs = "";
   for (var rk = 0; rk < HOUR_OPTS.length; rk++) {
     rs += '<button type="button" class="eopt" id="rs_' + rk + '" onclick="setHours(' + HOUR_OPTS[rk] + ')"><span class="hlabel">' + HOUR_LABELS[rk] + '</span></button>';
@@ -859,7 +961,6 @@ function initSheet() {
   $("rCustom").addEventListener("input", customChanged);
   $("qStart").addEventListener("change", quietChanged);
   $("qEnd").addEventListener("change", quietChanged);
-  // Custom Mood: quick emoji + energy picker
   var q = "";
   for (var j = 0; j < QUICK.length; j++) { q += '<button type="button" class="qe" onclick="setQuick(' + j + ')">' + QUICK[j] + '</button>'; }
   $("quickEmoji").innerHTML = q;
@@ -879,7 +980,6 @@ function initSheet() {
   }
 }
 
-// ----- shared sheet plumbing -----
 function showSheet(id) {
   openId = id;
   $("backdrop").className = "backdrop show";
@@ -904,7 +1004,6 @@ function fitSheet() {
   $(openId).style.maxHeight = Math.max(240, Math.floor(vv.height - 24)) + "px";
 }
 
-// ----- Log Mood -----
 function renderNr() {
   $("nrBtn0").className = nr[0] ? "switch on" : "switch";
   $("nrBtn1").className = nr[1] ? "switch on" : "switch";
@@ -920,6 +1019,8 @@ function openLog() {
   $("logBtn").disabled = true;
   nr[0] = false;
   renderNr();
+  needSel[0] = "";
+  renderNeeds(0);
   resetCap(0, [0, 0, 0]);
   renderPick();
   shareSel = [];
@@ -940,14 +1041,13 @@ function pick(i) {
 function submitMood() {
   if (selected === -1 || $("logBtn").disabled) { return; }
   $("logBtn").disabled = true;
-  window.location.href = "http://localhost/saveMood?i=" + (selected === -2 ? "rest" : selected) + "&nr=" + (nr[0] ? 1 : 0) + capQuery(0) + shareQuery() + "&note=" + encodeURIComponent($("noteInput").value);
+  window.location.href = "http://localhost/saveMood?i=" + (selected === -2 ? "rest" : selected) + "&nr=" + (nr[0] ? 1 : 0) + capQuery(0) + shareQuery() + "&note=" + encodeURIComponent($("noteInput").value) + (needSel[0] ? "&need=" + encodeURIComponent(needSel[0]) : "");
 }
 function submitSame() {
   $("sameBtn").disabled = true;
   window.location.href = "http://localhost/saveSame" + (shareQuery() ? "?" + shareQuery().slice(1) : "");
 }
 
-// ----- Edit current check-in -----
 function openEdit(id) {
   var key = id || MINE.id;
   var e = ENTRIES[key];
@@ -957,8 +1057,10 @@ function openEdit(id) {
   $("editNote").value = e.note;
   nr[1] = !!e.nr;
   renderNr();
+  needSel[1] = e.need || "";
+  renderNeeds(1);
   resetCap(1, e.cap);
-  $("editSub").textContent = "Currently " + e.mood + " · " + e.time + (CIRCLES.list.length > 1 ? ". Changes apply to " + CIRCLES.list[CIRCLES.active].n + "'s list only." : "");
+  $("editSub").textContent = "Currently " + e.mood + " · " + e.time + (e.editedTime ? " · ✏️ edited " + e.editedTime : "");
   $("editSaveBtn").disabled = false;
   renderEdit();
   resetDelete();
@@ -972,7 +1074,7 @@ function renderEdit() {
 function submitEdit() {
   if ($("editSaveBtn").disabled) { return; }
   $("editSaveBtn").disabled = true;
-  window.location.href = "http://localhost/saveEdit?id=" + encodeURIComponent(EDIT_ID) + "&i=" + (editSel === -2 ? "rest" : editSel) + "&nr=" + (nr[1] ? 1 : 0) + capQuery(1) + "&note=" + encodeURIComponent($("editNote").value);
+  window.location.href = "http://localhost/saveEdit?id=" + encodeURIComponent(EDIT_ID) + "&i=" + (editSel === -2 ? "rest" : editSel) + "&nr=" + (nr[1] ? 1 : 0) + capQuery(1) + "&note=" + encodeURIComponent($("editNote").value) + (needSel[1] ? "&need=" + encodeURIComponent(needSel[1]) : "");
 }
 function resetDelete() {
   delArmed = false;
@@ -991,7 +1093,6 @@ function askDelete() {
   window.location.href = "http://localhost/deleteEntry?id=" + encodeURIComponent(EDIT_ID);
 }
 
-// ----- Friends (a separate shared list for each) -----
 function renderShare() {
   var host = $("shareRow");
   if (CIRCLES.list.length < 2) { host.style.display = "none"; return; }
@@ -1062,7 +1163,6 @@ function saveFriends() {
   window.location.href = "http://localhost/saveFriends?s=" + flags.join(",") + "&d=" + dels.join(",");
 }
 
-// ----- Async Love -----
 function openLove() {
   loveSel = "";
   $("loveNote").value = "";
@@ -1088,7 +1188,6 @@ function submitLove() {
   window.location.href = "http://localhost/saveLove?k=" + encodeURIComponent(loveSel) + "&n=" + encodeURIComponent($("loveNote").value);
 }
 
-// ----- Capacity (social battery, sensory load, talking) -----
 function capHtml(w) {
   var TW = ["🗣️ Okay to talk", "💬 Text only", "🔇 No talking"];
   var h = '<div class="caplabel">Social battery <span class="capend">1 drained · 5 full</span></div><div class="capseg">';
@@ -1130,7 +1229,6 @@ function capQuery(w) {
   return q;
 }
 
-// ----- Trends -----
 function openTrends(who) { tWho = who; renderTrends(); showSheet("trendSheet"); }
 function setTWho(w) { tWho = w; renderTrends(); }
 function setTRange(r) { tRange = r; renderTrends(); }
@@ -1189,7 +1287,6 @@ function renderTrends() {
   $("trendBody").innerHTML = h;
 }
 
-// ----- What helps -----
 function openHelps() {
   var p = HELPS.partner;
   var spec = "";
@@ -1243,7 +1340,6 @@ function saveHelpsNow() {
   window.location.href = "http://localhost/saveHelps?d=" + encodeURIComponent(JSON.stringify(cards));
 }
 
-// ----- Check-in reminders -----
 function openRemind() {
   rHours = SETTINGS.hours;
   qOn = SETTINGS.quietOn;
@@ -1285,7 +1381,6 @@ function saveRemind() {
 }
 function testRemind() { window.location.href = "http://localhost/testReminder"; }
 
-// ----- Custom Mood -----
 function openCustom() {
   $("cEmoji").value = "";
   $("cName").value = "";
@@ -1320,7 +1415,6 @@ function submitCustom() {
   window.location.href = "http://localhost/saveCustom?t=" + encodeURIComponent(composeTitle()) + "&e=" + cEnergy;
 }
 
-// ----- Manage Moods -----
 function openManage() {
   mEnergy = [];
   mDel = [];
@@ -1380,6 +1474,25 @@ async function buildHtml(state) {
   if (!allReminders || allReminders.length === 0)
     allReminders = buildMockData();
 
+  // Gather latest mood status for each friend in the top bar
+  let friendBarData = {};
+  for (let c of circles) {
+    let fCal = findCalendar(c.list);
+    if (!fCal) continue;
+    try {
+      let fRems = (cal && fCal.identifier === cal.identifier) ? allReminders : await Reminder.all([fCal]);
+      let fLatest = fRems
+        .filter((r) => !isDataTitle(r.title) && parseMood(r.title).user.toLowerCase() === c.partner.toLowerCase())
+        .sort((a, b) => getTime(b) - getTime(a))[0];
+      if (fLatest) {
+        let fp = parseMood(fLatest.title);
+        let token = faceify(fp.mood).split(" ")[0] || "●";
+        let isRecent = fLatest.creationDate && (Date.now() - new Date(fLatest.creationDate).getTime() < 6 * 3600 * 1000);
+        friendBarData[c.partner.toLowerCase()] = { token, isRecent };
+      }
+    } catch (e) {}
+  }
+
   let myHelps = parseHelps(allReminders.find((r) => isHelpsFor(r, myUserName)));
   let partnerHelps = parseHelps(
     allReminders.find((r) => isHelpsFor(r, partnerUserName)),
@@ -1409,7 +1522,6 @@ async function buildHtml(state) {
       esc(partnerUserName.charAt(0)) +
       "</div></div>";
 
-  // CRITICAL: Filter out data reminders (avatars, "Helps: <Name>") so they never show up in history
   let reminders = allReminders.filter((r) => !isDataTitle(r.title));
   reminders.sort((a, b) => getTime(b) - getTime(a));
 
@@ -1436,8 +1548,6 @@ async function buildHtml(state) {
   let myNote =
     mySplit.text || (myResting ? "No check-ins needed" : "Tap 'Log Mood'");
   let myTime = myLatest ? relTime(myLatest.r.creationDate) : "--";
-  // A resting status is never "stale": silence is expected, not worrying
-  // My own card never goes amber/dim: a "you're behind" cue reads as guilt
   let myStale = false;
   let partnerMood = partnerLatest ? partnerLatest.mood : "No Status";
   let partnerSplit = splitNotes(partnerLatest ? partnerLatest.r.notes : "");
@@ -1455,14 +1565,13 @@ async function buildHtml(state) {
       ? isStale(partnerLatest.r.creationDate)
       : false;
 
-  // "What helps" cards: show a pill when the partner wrote one for their current mood (or in general)
   let partnerKey = String(partnerLatest ? partnerLatest.mood : "")
     .trim()
     .toLowerCase();
   let showHelps = partnerHelps.some(
     (c) => c.m === "*" || c.m.trim().toLowerCase() === partnerKey,
   );
-  // My own entries by identifier (tap one in History to edit or delete it)
+
   entriesState = {};
   let entryCount = 0;
   for (let r of reminders) {
@@ -1475,12 +1584,14 @@ async function buildHtml(state) {
       mood: faceify(ep.mood),
       note: ens.text,
       nr: ens.noReply,
+      need: ens.need || "",
       cap: [
         ens.cap.social || 0,
         ens.cap.sensory || 0,
         ["ok", "text", "none"].indexOf(ens.cap.talk) + 1,
       ],
       time: relTime(r.creationDate),
+      editedTime: ens.editedDate ? relTime(ens.editedDate) : "",
       idx: isRestingMood(ep.mood)
         ? -2
         : moods.findIndex((m) => String(m.title).trim().toLowerCase() === ekey),
@@ -1488,7 +1599,6 @@ async function buildHtml(state) {
     if (++entryCount >= 150) break;
   }
 
-  // Async Love: notes from my friend to me (last 48h, not hidden) and how many I sent today
   let loves = allReminders.map(parseLove).filter(Boolean);
   let hiddenLove = loadHiddenLove();
   let nowMs = Date.now();
@@ -1513,7 +1623,6 @@ async function buildHtml(state) {
     to: partnerUserName,
   };
 
-  // Trends for both people (also drives the "energy has been low" banner)
   let meEntries = collectEntries(reminders, myUserName);
   let partnerEntries = collectEntries(reminders, partnerUserName);
   trendState = {
@@ -1527,7 +1636,6 @@ async function buildHtml(state) {
       28: summarizeTrend(partnerEntries, 28),
     },
   };
-  // No banner while someone is resting: resting is already the response to low energy
   let myAlert = myResting ? null : trendState.me["14"].alert;
   let partnerAlert = partnerResting ? null : trendState.partner["14"].alert;
   helpsState = {
@@ -1615,11 +1723,13 @@ async function buildHtml(state) {
           esc(faceify(p.mood)) +
           "</div>" +
           (hs.text ? '<div class="note">' + esc(hs.text) + "</div>" : "") +
+          needPillHtml(hs.need) +
           (hs.noReply ? '<div class="nr-pill">🔕 No reply needed</div>' : "") +
           capChipsHtml(hs.cap) +
           '</div><div class="time">' +
-          esc(formatDate(r.creationDate)) +
+          (hs.editedDate ? '<div style="font-size:10px;opacity:0.7">✏️ ' + esc(relTime(hs.editedDate)) + '</div>' : '') +
           energyDotsHtml(p.mood, hs.cap.energy) +
+          esc(formatDate(r.creationDate)) +
           "</div></div>";
       }
       historyHtml += "</div>";
@@ -1628,17 +1738,17 @@ async function buildHtml(state) {
   if (!historyHtml) historyHtml = '<div class="note">No history found.</div>';
 
   let css = [
-    "body{background:#0b0c10;color:#fff;font-family:-apple-system,sans-serif;padding:20px;margin:0}",
-    "h2{margin-top:0;margin-bottom:16px;font-size:24px}",
+    `body{background:${activeTheme.bg};color:${activeTheme.text};font-family:-apple-system,sans-serif;padding:20px;margin:0}`,
+    `h2{margin-top:0;margin-bottom:16px;font-size:24px;color:${activeTheme.text}}`,
     ".dual-container{display:flex;gap:12px;margin-bottom:20px}",
-    ".hero{flex:1;min-width:0;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.12);border-radius:20px;padding:14px;box-sizing:border-box}",
-    ".hero-partner{border-color:rgba(236,72,153,0.3)}",
+    `.hero{flex:1;min-width:0;background:${activeTheme.heroMe};border:1px solid ${activeTheme.border};border-radius:20px;padding:14px;box-sizing:border-box}`,
+    `.hero-partner{background:${activeTheme.heroPartner};border-color:${activeTheme.borderPartner}}`,
     ".hero-header{display:flex;align-items:center;gap:10px;margin-bottom:12px;border-bottom:1px solid rgba(255,255,255,0.08);padding-bottom:10px}",
     ".hero-label{font-size:10px;color:#818cf8;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:2px}",
     ".hero-label-partner{color:#f472b6}",
     ".hero-name{font-size:14px;font-weight:800;color:#fff;min-width:0;overflow-wrap:anywhere}",
-    ".hero-name-me{color:#818cf8}",
-    ".hero-name-partner{color:#f472b6}",
+    `.hero-name-me{color:${activeTheme.accentMe}}`,
+    `.hero-name-partner{color:${activeTheme.accentPartner}}`,
     ".avatar-wrapper{position:relative;display:inline-block;flex-shrink:0}",
     ".avatar{box-sizing:border-box;width:72px;height:72px;border-radius:50%;object-fit:cover;display:block;border:2px solid rgba(255,255,255,0.2)}",
     ".avatar-fallback{box-sizing:border-box;width:72px;height:72px;border-radius:50%;background:#6366f1;display:flex;align-items:center;justify-content:center;font-weight:bold;font-size:28px;color:#fff;border:2px solid rgba(255,255,255,0.2)}",
@@ -1647,20 +1757,20 @@ async function buildHtml(state) {
     ".hero-clickable{cursor:pointer}",
     ".hero-clickable:active{opacity:0.7}",
     ".hero-title{font-size:20px;font-weight:800;margin-bottom:6px;word-break:break-word}",
-    ".note{color:rgba(255,255,255,0.6);font-size:12px;font-style:italic}",
-    ".btn{background:#6366f1;color:#fff;text-decoration:none;padding:14px;border-radius:14px;font-weight:600;font-size:15px;margin-bottom:10px;display:block;text-align:center;box-sizing:border-box}",
-    ".btn-sec{background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.12)}",
+    `.note{color:${activeTheme.textDim};font-size:12px;font-style:italic}`,
+    `.btn{background:${activeTheme.btnPrimary};border:1px solid ${activeTheme.btnPrimaryBorder};color:#fff;text-decoration:none;padding:14px;border-radius:14px;font-weight:600;font-size:15px;margin-bottom:10px;display:block;text-align:center;box-sizing:border-box}`,
+    `.btn-sec{background:${activeTheme.cardSec};border:1px solid ${activeTheme.border}}`,
     ".year-header{font-size:18px;font-weight:800;color:#818cf8;margin-top:24px;margin-bottom:10px;border-bottom:1px solid rgba(255,255,255,0.1);padding-bottom:4px}",
     ".month-toggle{font-size:13px;font-weight:700;color:rgba(255,255,255,0.8);text-transform:uppercase;letter-spacing:0.5px;margin-top:10px;margin-bottom:6px;background:rgba(255,255,255,0.05);padding:10px 14px;border-radius:10px;border:1px solid rgba(255,255,255,0.08);display:flex;justify-content:space-between;align-items:center;user-select:none}",
     ".toggle-icon{font-size:14px;color:#818cf8}",
     ".month-container{margin-bottom:12px}",
-    ".card{background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.12);border-radius:14px;padding:12px 16px;margin-bottom:8px;display:flex;justify-content:space-between;align-items:center;gap:10px}",
+    `.card{background:${activeTheme.card};border:1px solid ${activeTheme.border};border-radius:14px;padding:12px 16px;margin-bottom:8px;display:flex;justify-content:space-between;align-items:center;gap:10px}`,
     ".user-tag{font-size:10px;font-weight:700;margin-bottom:2px;text-transform:uppercase;display:inline-block;padding:2px 6px;border-radius:6px}",
     ".tag-me{background:rgba(99,102,241,0.2);color:#818cf8;border:1px solid rgba(99,102,241,0.4)}",
     ".tag-partner{background:rgba(236,72,153,0.2);color:#f472b6;border:1px solid rgba(236,72,153,0.4)}",
     ".title{font-weight:600;font-size:14px;margin-top:2px}",
-    ".time{font-size:11px;color:rgba(255,255,255,0.5);text-align:right;flex-shrink:0}",
-    ".dots{display:block;color:#00e5ff;font-size:11px;letter-spacing:1px;margin-bottom:6px}",
+    `.time{font-size:11px;color:${activeTheme.textSub};text-align:right;flex-shrink:0}`,
+    `.dots{display:block;color:${activeTheme.dots};font-size:11px;letter-spacing:1px;margin-bottom:6px}`,
     ".time .dots{margin:4px 0 0 0}",
     ".stale .hero-title,.stale .dots{opacity:0.6}",
     ".stale .time{color:rgba(251,191,36,0.85)}",
@@ -1668,25 +1778,39 @@ async function buildHtml(state) {
     ".btn-row .btn{flex:1;min-width:0;padding:12px 8px;font-size:14px}",
     ".backdrop{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.55);-webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px);opacity:0;pointer-events:none;transition:opacity 0.25s ease;z-index:90}",
     ".backdrop.show{opacity:1;pointer-events:auto}",
-    ".sheet{position:fixed;left:0;right:0;bottom:0;z-index:100;box-sizing:border-box;background:#14151c;border:1px solid rgba(255,255,255,0.1);border-bottom:none;border-radius:26px 26px 0 0;padding:10px 16px calc(18px + env(safe-area-inset-bottom));max-height:88vh;overflow-y:auto;transform:translateY(105%);transition:transform 0.3s cubic-bezier(0.2,0.8,0.2,1);box-shadow:0 -10px 40px rgba(0,0,0,0.5)}",
+    `.sheet{position:fixed;left:0;right:0;bottom:0;z-index:100;box-sizing:border-box;background:${activeTheme.card};border:1px solid ${activeTheme.border};border-bottom:none;border-radius:26px 26px 0 0;padding:10px 16px calc(18px + env(safe-area-inset-bottom));max-height:88vh;overflow-y:auto;transform:translateY(105%);transition:transform 0.3s cubic-bezier(0.2,0.8,0.2,1);box-shadow:0 -10px 40px rgba(0,0,0,0.5)}`,
     ".sheet.show{transform:translateY(0)}",
     ".grabber{width:40px;height:5px;border-radius:3px;background:rgba(255,255,255,0.25);margin:0 auto 14px}",
     ".sheet-title{font-size:20px;font-weight:800;margin:0}",
     ".sheet-sub{font-size:13px;color:rgba(255,255,255,0.55);margin:2px 0 14px}",
-    ".mood-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}",
-    ".chip{appearance:none;-webkit-appearance:none;font:inherit;color:#fff;text-align:left;background:rgba(255,255,255,0.06);border:1.5px solid rgba(255,255,255,0.1);border-radius:16px;padding:12px;display:flex;flex-direction:column;gap:3px;min-width:0;transition:background 0.15s,border-color 0.15s,box-shadow 0.15s}",
-    ".chip:active{transform:scale(0.97)}",
-    ".chip.sel{background:rgba(99,102,241,0.22);border-color:#6366f1;box-shadow:0 0 0 3px rgba(99,102,241,0.25)}",
-    ".chip-emoji{font-size:28px;line-height:1.1}",
-    ".chip-emoji.ini{width:32px;height:32px;border-radius:50%;background:rgba(129,140,248,0.25);color:#c7d2fe;font-size:16px;font-weight:800;display:flex;align-items:center;justify-content:center}",
-    ".chip-label{font-size:14px;font-weight:700;overflow-wrap:anywhere}",
-    ".cdots{color:#00e5ff;font-size:10px;letter-spacing:1px}",
+
+    /* Grid & Chips Layout */
+    `.mood-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px}`,
+    `.chip{appearance:none;-webkit-appearance:none;font:inherit;color:${activeTheme.text};text-align:left;background:${activeTheme.cardSec};border:1.5px solid ${activeTheme.border};border-radius:16px;padding:12px;display:flex;flex-direction:column;gap:5px;min-width:0;box-sizing:border-box;cursor:pointer;transition:transform 0.15s,border-color 0.15s,background 0.15s}`,
+    `.chip:active{transform:scale(0.97)}`,
+    `.chip.sel{background:${activeTheme.card};border-color:${activeTheme.accentMe};box-shadow:0 0 0 3px ${activeTheme.border}}`,
+    `.chip-emoji{font-size:26px;line-height:1.1;display:block}`,
+    `.chip-emoji.ini{width:30px;height:30px;border-radius:50%;background:${activeTheme.border};color:${activeTheme.accentMe};font-size:14px;font-weight:800;display:flex;align-items:center;justify-content:center}`,
+    `.chip-label{font-size:14px;font-weight:700;color:${activeTheme.text};display:block;overflow-wrap:anywhere}`,
+    `.cdots{color:${activeTheme.dots};font-size:11px;letter-spacing:1.5px;display:block}`,
+
+    /* Full-width Resting Chip */
+    `.rest-chip{grid-column:1 / -1;display:flex;flex-direction:row;align-items:center;gap:12px;padding:12px 14px}`,
+    `.rest-chip .chip-emoji{font-size:24px;flex-shrink:0}`,
+    `.rest-chip .chip-label{font-size:15px;flex-shrink:0}`,
+    `.rest-sub{margin-left:auto;text-align:right;font-size:11px;color:${activeTheme.textSub};line-height:1.3}`,
+
+    /* Need Chips */
+    `.need-chips{display:flex;flex-wrap:wrap;gap:6px;margin:8px 0 12px 0}`,
+    `.nchip{appearance:none;-webkit-appearance:none;font:inherit;font-size:12px;font-weight:600;padding:7px 12px;border-radius:999px;border:1px solid ${activeTheme.border};background:${activeTheme.cardSec};color:${activeTheme.textDim};cursor:pointer}`,
+    `.nchip.sel{background:${activeTheme.card};border-color:${activeTheme.accentPartner};color:${activeTheme.text};box-shadow:0 0 0 2px ${activeTheme.border}}`,
+
     ".note-input{box-sizing:border-box;width:100%;margin-top:12px;background:rgba(255,255,255,0.07);border:1px solid rgba(255,255,255,0.12);border-radius:14px;padding:14px;color:#fff;font-size:16px;font-family:inherit;outline:none}",
     ".note-input:focus{border-color:#6366f1}",
     ".note-input::placeholder{color:rgba(255,255,255,0.4)}",
     ".sheet-actions{display:flex;gap:10px;margin-top:12px}",
     ".sbtn{appearance:none;-webkit-appearance:none;font:inherit;font-weight:600;font-size:15px;color:#fff;border-radius:14px;padding:14px;border:1px solid rgba(255,255,255,0.12);background:rgba(255,255,255,0.08);flex:1}",
-    ".sbtn-primary{flex:2;background:#6366f1;border-color:#6366f1}",
+    `.sbtn-primary{flex:2;background:${activeTheme.btnPrimary};border-color:${activeTheme.btnPrimaryBorder}}`,
     ".sbtn:disabled{opacity:0.4}",
     ".sheet-empty{color:rgba(255,255,255,0.6);font-size:14px;padding:8px 0}",
     ".cust-row{display:flex;gap:10px}",
@@ -1719,7 +1843,7 @@ async function buildHtml(state) {
     ".edot{appearance:none;-webkit-appearance:none;background:none;border:none;color:#00e5ff;font-size:22px;line-height:1;padding:6px 7px}",
     ".mhint{display:none;font-size:12px;color:#fbbf24;margin:0 0 10px}",
     ".top-actions{display:flex;align-items:center;gap:8px}",
-    ".iconbtn{cursor:pointer;font-size:16px;line-height:1;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.12);border-radius:12px;padding:9px 12px}",
+    `.iconbtn{cursor:pointer;font-size:16px;line-height:1;background:${activeTheme.cardSec};border:1px solid ${activeTheme.border};border-radius:12px;padding:9px 12px;text-decoration:none;display:inline-block}`,
     ".iconbtn:active{opacity:0.6}",
     ".iconbtn.off{opacity:0.45}",
     ".danger-link{display:block;width:100%;margin-top:6px;background:none;border:none;color:#fca5a5;font:inherit;font-weight:600;font-size:14px;padding:12px}",
@@ -1729,19 +1853,18 @@ async function buildHtml(state) {
     ".r-row{display:flex;align-items:center;gap:10px;margin-top:10px;color:rgba(255,255,255,0.7);font-size:14px}",
     ".num-input{box-sizing:border-box;width:84px;text-align:center;background:rgba(255,255,255,0.07);border:1px solid rgba(255,255,255,0.12);border-radius:12px;padding:10px;color:#fff;font-size:16px;font-family:inherit;outline:none}",
     ".num-input:focus{border-color:#6366f1}",
+    ".num-input::placeholder{color:rgba(255,255,255,0.4)}",
     ".switch{appearance:none;-webkit-appearance:none;font:inherit;font-weight:700;font-size:13px;padding:9px 16px;border-radius:999px;border:1px solid rgba(255,255,255,0.15);background:rgba(255,255,255,0.08);color:rgba(255,255,255,0.7)}",
     ".switch.on{background:#6366f1;border-color:#6366f1;color:#fff}",
     ".hsel{color-scheme:dark;background:rgba(255,255,255,0.07);border:1px solid rgba(255,255,255,0.12);border-radius:12px;color:#fff;font-size:16px;padding:10px 8px;font-family:inherit}",
     ".hsel:disabled{opacity:0.4}",
     ".resting{border-color:rgba(129,140,248,0.4)}",
     ".nr-pill{display:inline-block;font-size:11px;font-weight:600;color:#c7d2fe;background:rgba(99,102,241,0.18);border:1px solid rgba(99,102,241,0.35);border-radius:999px;padding:3px 9px;margin:0 0 8px 0}",
+    `.need-pill{display:inline-block;font-size:11px;font-weight:700;color:${activeTheme.accentPartner};background:${activeTheme.cardSec};border:1px solid ${activeTheme.border};border-radius:999px;padding:3px 10px;margin:0 0 8px 0}`,
     ".helps-pill{display:inline-block;cursor:pointer;font-size:12px;font-weight:700;color:#fde68a;background:rgba(251,191,36,0.14);border:1px solid rgba(251,191,36,0.4);border-radius:999px;padding:5px 11px;margin:2px 0 8px 0}",
     ".helps-pill:active{opacity:0.6}",
     ".samebtn{appearance:none;-webkit-appearance:none;display:flex;align-items:center;justify-content:center;width:100%;box-sizing:border-box;margin:0 0 12px 0;padding:12px;border-radius:14px;border:1px dashed rgba(129,140,248,0.5);background:rgba(99,102,241,0.12);color:#c7d2fe;font:inherit;font-weight:600;font-size:14px}",
     ".samebtn:disabled{opacity:0.5}",
-    ".rest-chip{grid-column:1 / -1;flex-direction:row;align-items:center;gap:10px}",
-    ".rest-chip .chip-emoji{font-size:24px}",
-    ".rest-sub{margin-left:auto;text-align:right;font-size:12px;color:rgba(255,255,255,0.6)}",
     ".mood-grid .sheet-empty{grid-column:1 / -1}",
     ".nr-row{margin-top:10px}",
     ".help-card{padding:12px 14px;border-radius:14px;background:rgba(251,191,36,0.1);border:1px solid rgba(251,191,36,0.3);margin-bottom:10px}",
@@ -1801,7 +1924,7 @@ async function buildHtml(state) {
     ".friend-list-name{font-size:12px;color:rgba(255,255,255,0.5);margin:2px 0 4px 0;overflow-wrap:anywhere}",
     ".top-bar{display:flex;justify-content:space-between;align-items:center;margin-bottom:16px}",
     ".top-bar h2{margin:0}",
-    ".refresh{color:#818cf8;text-decoration:none;font-size:13px;font-weight:700;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.12);border-radius:12px;padding:8px 14px}",
+    `.refresh{color:${activeTheme.accentMe};text-decoration:none;font-size:13px;font-weight:700;background:${activeTheme.cardSec};border:1px solid ${activeTheme.border};border-radius:12px;padding:8px 14px}`,
     ".refresh:active{opacity:0.6}",
   ].join("");
 
@@ -1818,22 +1941,27 @@ async function buildHtml(state) {
     buildSheetJs() +
     "</script></head><body>" +
     '<div class="top-bar"><h2>Dashboard</h2><div class="top-actions">' +
+    '<a class="iconbtn" href="http://localhost/toggleTheme" title="Switch Theme">🎨</a>' +
     '<div class="iconbtn' +
     (settings.reminderHours ? "" : " off") +
     '" onclick="openRemind()">🔔</div>' +
     '<a class="refresh" href="http://localhost/refresh">↻ Refresh</a></div></div>' +
     '<div class="friend-bar">' +
     circles
-      .map(
-        (c, i) =>
+      .map((c, i) => {
+        let st = friendBarData[c.partner.toLowerCase()];
+        let badge = st ? (st.isRecent ? '<span style="color:' + activeTheme.dots + '">● </span>' : '') + st.token + ' ' : '';
+        return (
           '<a class="fchip' +
           (i === activeCircle ? " active" : "") +
           '" href="http://localhost/switch?i=' +
           i +
           '">' +
+          badge +
           esc(c.partner) +
-          "</a>",
-      )
+          "</a>"
+        );
+      })
       .join("") +
     '<div class="fchip add" onclick="openFriends()">＋</div></div>' +
     '<div class="dual-container">' +
@@ -1856,13 +1984,15 @@ async function buildHtml(state) {
     '<div class="note" style="margin-bottom:8px;">"' +
     esc(myNote) +
     '"</div>' +
+    needPillHtml(mySplit.need) +
     (mySplit.noReply ? '<div class="nr-pill">🔕 No reply needed</div>' : "") +
     capChipsHtml(mySplit.cap) +
     '<div class="time" style="text-align:left">' +
     esc(myTime) +
+    (mySplit.editedDate ? ' · <span style="opacity:0.75">✏️ edited ' + esc(relTime(mySplit.editedDate)) + '</span>' : '') +
     "</div>" +
     "</div></div>" +
-    // PARTNER CARD (Styled with Pink Accent)
+    // PARTNER CARD
     '<div class="hero hero-partner' +
     (partnerStale ? " stale" : "") +
     (partnerResting ? " resting" : "") +
@@ -1880,6 +2010,7 @@ async function buildHtml(state) {
     '<div class="note" style="margin-bottom:8px;">"' +
     esc(partnerNote) +
     '"</div>' +
+    needPillHtml(partnerSplit.need) +
     (partnerSplit.noReply
       ? '<div class="nr-pill">🔕 No reply needed</div>'
       : "") +
@@ -1890,6 +2021,7 @@ async function buildHtml(state) {
     '<div class="love-pill" onclick="openLove()">💌 Send love</div>' +
     '<div class="time" style="text-align:left">' +
     esc(partnerTime) +
+    (partnerSplit.editedDate ? ' · <span style="opacity:0.75">✏️ edited ' + esc(relTime(partnerSplit.editedDate)) + '</span>' : '') +
     "</div>" +
     "</div>" +
     "</div>" +
@@ -1938,7 +2070,7 @@ async function buildHtml(state) {
     "<div>" +
     historyHtml +
     "</div>" +
-    // BOTTOM SHEETS (Log Mood / Custom Mood / Manage Moods)
+    // BOTTOM SHEETS
     '<div id="backdrop" class="backdrop" onclick="closeSheet()"></div>' +
     // --- Log Mood ---
     '<div id="logSheet" class="sheet">' +
@@ -1949,6 +2081,14 @@ async function buildHtml(state) {
     "</div>" +
     '<button type="button" id="sameBtn" class="samebtn" style="display:none" onclick="submitSame()"></button>' +
     '<div id="moodGrid" class="mood-grid"></div>' +
+    '<div class="caplabel">What I need right now (optional)</div>' +
+    '<div class="need-chips">' +
+    '<button type="button" class="nchip" id="need_0_space" onclick="setNeed(0,\'space\')">🎧 Space</button>' +
+    '<button type="button" class="nchip" id="need_0_parallel" onclick="setNeed(0,\'parallel\')">🛋️ Parallel play</button>' +
+    '<button type="button" class="nchip" id="need_0_distract" onclick="setNeed(0,\'distract\')">💬 Distraction</button>' +
+    '<button type="button" class="nchip" id="need_0_comfort" onclick="setNeed(0,\'comfort\')">🫂 Comfort</button>' +
+    '<button type="button" class="nchip" id="need_0_advice" onclick="setNeed(0,\'advice\')">💡 Advice</button>' +
+    '</div>' +
     '<input id="noteInput" class="note-input" type="text" maxlength="140" placeholder="Add a note (optional)" autocomplete="off" autocapitalize="sentences">' +
     '<div class="nr-row"><button type="button" id="nrBtn0" class="switch" onclick="toggleNr(0)">🔕 No reply needed</button> <button type="button" id="capBtn0" class="switch" onclick="toggleCap(0)">📊 Capacity</button></div>' +
     '<div id="capHost0" class="capbox" style="display:none"></div>' +
@@ -1963,6 +2103,14 @@ async function buildHtml(state) {
     '<h3 class="sheet-title">Edit your check-in</h3>' +
     '<div id="editSub" class="sheet-sub"></div>' +
     '<div id="editGrid" class="mood-grid"></div>' +
+    '<div class="caplabel">What I need right now (optional)</div>' +
+    '<div class="need-chips">' +
+    '<button type="button" class="nchip" id="need_1_space" onclick="setNeed(1,\'space\')">🎧 Space</button>' +
+    '<button type="button" class="nchip" id="need_1_parallel" onclick="setNeed(1,\'parallel\')">🛋️ Parallel play</button>' +
+    '<button type="button" class="nchip" id="need_1_distract" onclick="setNeed(1,\'distract\')">💬 Distraction</button>' +
+    '<button type="button" class="nchip" id="need_1_comfort" onclick="setNeed(1,\'comfort\')">🫂 Comfort</button>' +
+    '<button type="button" class="nchip" id="need_1_advice" onclick="setNeed(1,\'advice\')">💡 Advice</button>' +
+    '</div>' +
     '<input id="editNote" class="note-input" type="text" maxlength="140" placeholder="Add a note (optional)" autocomplete="off" autocapitalize="sentences">' +
     '<div class="nr-row"><button type="button" id="nrBtn1" class="switch" onclick="toggleNr(1)">🔕 No reply needed</button> <button type="button" id="capBtn1" class="switch" onclick="toggleCap(1)">📊 Capacity</button></div>' +
     '<div id="capHost1" class="capbox" style="display:none"></div>' +
@@ -2025,7 +2173,7 @@ async function buildHtml(state) {
     '<div id="trendBody" class="trend-body"></div>' +
     '<div class="sheet-actions"><button type="button" class="sbtn sbtn-primary" onclick="closeSheet()">Close</button></div>' +
     "</div>" +
-    // --- What helps (viewing the partner's cards) ---
+    // --- What helps ---
     '<div id="helpsSheet" class="sheet">' +
     '<div class="grabber"></div>' +
     '<h3 id="helpsTitle" class="sheet-title">What helps</h3>' +
@@ -2033,7 +2181,7 @@ async function buildHtml(state) {
     '<div id="helpsBody"></div>' +
     '<div class="sheet-actions"><button type="button" class="sbtn sbtn-primary" onclick="closeSheet()">Got it</button></div>' +
     "</div>" +
-    // --- What helps me (writing my own cards) ---
+    // --- What helps me ---
     '<div id="myHelpsSheet" class="sheet">' +
     '<div class="grabber"></div>' +
     '<h3 class="sheet-title">What helps me</h3>' +
@@ -2077,7 +2225,6 @@ async function buildHtml(state) {
   );
 }
 
-// Reads "?a=1&b=2" from a URL (safe against malformed escapes)
 function parseQuery(url) {
   let out = {};
   let q = (url.split("?")[1] || "").split("#")[0];
@@ -2093,8 +2240,6 @@ function parseQuery(url) {
   return out;
 }
 
-// Called when the in-page "Log Mood" sheet submits. Same reminder format as before:
-// title "[Name] <mood title>", notes = optional note.
 async function saveMoodFromUrl(url) {
   let q = parseQuery(url || "");
   let title = null;
@@ -2106,18 +2251,15 @@ async function saveMoodFromUrl(url) {
     title = moods[idx].title;
   }
 
-  // Capacity from the sheet, plus this mood's energy so trends don't depend on presets
   let cap = capFromQuery(q);
   let energy = energyOfTitle(title);
   if (energy != null) cap.energy = energy;
 
   let targets = q.to ? parseTargets(q.to) : [activeCircle];
   if (!targets.length) targets = [activeCircle];
-  await writeCheckins(targets, title, buildNotes(q.note, q.nr === "1", cap));
+  await writeCheckins(targets, title, buildNotes(q.note, q.nr === "1", cap, q.need || null));
 }
 
-// "Same as last" button: logs my previous check-in again, copying its note,
-// "no reply needed" flag and capacity (energy is re-read so older check-ins gain it)
 async function saveSameFromUrl(url) {
   let prev = myLatestReminderRef;
   if (!prev) return;
@@ -2129,11 +2271,9 @@ async function saveSameFromUrl(url) {
   let cap = Object.assign({}, ns.cap);
   let energy = energyOfTitle(mood);
   if (cap.energy == null && energy != null) cap.energy = energy;
-  await writeCheckins(targets, mood, buildNotes(ns.text, ns.noReply, cap));
+  await writeCheckins(targets, mood, buildNotes(ns.text, ns.noReply, cap, ns.need || null));
 }
 
-// Edit sheet -> change mood, note, flags and capacity on my latest check-in
-// One of MY check-ins in the active list, by identifier (never a data reminder or the friend's entry)
 async function findMyEntry(id) {
   if (!id) return myLatestReminderRef;
   let all = await Reminder.all([cal]);
@@ -2163,18 +2303,37 @@ async function saveEditFromUrl(url) {
     let e = energyOfTitle(moodTitle);
     if (e != null) cap.energy = e;
   } else {
-    // mood unchanged: keep the energy already stored (or read it from my presets)
     let e =
       before.cap.energy != null
         ? before.cap.energy
         : energyOfTitle(parseMood(r.title || "").mood);
     if (e != null) cap.energy = e;
   }
-  r.notes = buildNotes(q.note, q.nr === "1", cap);
+  r.notes = buildNotes(q.note, q.nr === "1", cap, q.need || null, new Date());
   await r.save();
+
+  // Sync the edit to matching check-ins in your other friends' lists
+  let rTime = r.creationDate ? new Date(r.creationDate).getTime() : 0;
+  for (let k of shareCalendars()) {
+    if (cal && k.identifier === cal.identifier) continue;
+    try {
+      let others = await Reminder.all([k]);
+      let match = others.find((x) => {
+        if (isDataTitle(x.title)) return false;
+        let p = parseMood(x.title || "");
+        if (p.user.toLowerCase() !== myUserName.toLowerCase()) return false;
+        let xt = x.creationDate ? new Date(x.creationDate).getTime() : 0;
+        return Math.abs(xt - rTime) < 180000; // created around the same time
+      });
+      if (match) {
+        match.title = r.title;
+        match.notes = r.notes;
+        await match.save();
+      }
+    } catch (err) {}
+  }
 }
 
-// "What helps me" sheet -> saves my cards into a "Helps: <Name>" reminder in each shared list
 async function saveHelpsFromUrl(url) {
   let q = parseQuery(url || "");
   let cards;
@@ -2200,10 +2359,6 @@ async function saveHelpsFromUrl(url) {
   }
 }
 
-// ---- Quick log: log a mood with no UI ----
-// From a Shortcut ("Run Script" with the mood name as input) or a URL:
-//   scriptable:///run/mood-dashboard?mood=Low%20Battery&note=quiet&noreply=1
-// Special names: "rest" (Resting) and "last" (same as my previous check-in)
 function normName(s) {
   return String(s || "")
     .toLowerCase()
@@ -2289,8 +2444,8 @@ async function performQuickLog(p) {
   let cap = Object.assign({}, p.cap);
   let text = p.note;
   let noReply = p.noReply;
+  let need = p.need || null;
   let n = normName(p.spec);
-  // "last" with nothing else given = an exact repeat of my previous check-in
   if (
     ["last", "same", "same as last"].indexOf(n) !== -1 &&
     mine &&
@@ -2301,12 +2456,12 @@ async function performQuickLog(p) {
     let ns = splitNotes(mine.notes);
     text = ns.text;
     noReply = ns.noReply;
+    need = ns.need;
     cap = Object.assign({}, ns.cap);
   }
   let energy = energyOfTitle(title);
   if (energy != null) cap.energy = energy;
 
-  // Default: every friend with sharing on; "to" (names) narrows it
   let targets = defaultTargets();
   if (p.to) {
     let names = p.to.map((x) => String(x).trim().toLowerCase());
@@ -2316,7 +2471,7 @@ async function performQuickLog(p) {
     });
     if (picked.length) targets = picked;
   }
-  let n2 = await writeCheckins(targets, title, buildNotes(text, noReply, cap));
+  let n2 = await writeCheckins(targets, title, buildNotes(text, noReply, cap, need));
   if (!n2) return { ok: false, msg: "No shared list found to log into" };
   return {
     ok: true,
@@ -2327,7 +2482,6 @@ async function performQuickLog(p) {
   };
 }
 
-// Edit sheet -> delete my latest check-in
 async function deleteEntryFromUrl(url) {
   let q = parseQuery(url || "");
   let r = await findMyEntry(q.id);
@@ -2335,7 +2489,6 @@ async function deleteEntryFromUrl(url) {
   await r.remove();
 }
 
-// ---- Check-in reminders (local notifications) ----
 const REMINDER_ID = "mood-checkin-reminder";
 
 function describeHours(h) {
@@ -2343,7 +2496,6 @@ function describeHours(h) {
   return h + (h === 1 ? " hour" : " hours");
 }
 
-// If a time falls inside quiet hours, hold it until the quiet window ends
 function adjustForQuietHours(date) {
   if (!settings.quietEnabled || settings.quietStart === settings.quietEnd)
     return date;
@@ -2359,8 +2511,6 @@ function adjustForQuietHours(date) {
   return r;
 }
 
-// Schedules ONE notification: (my latest check-in + chosen hours), adjusted for quiet hours.
-// Re-run whenever I open the dashboard, log/edit/delete a mood, or change settings.
 async function scheduleCheckInReminder() {
   try {
     if (!settings.reminderHours || !cal) {
@@ -2381,7 +2531,6 @@ async function scheduleCheckInReminder() {
         latestMood = p.mood;
       }
     }
-    // No check-ins yet, or I'm resting: no nudges
     if (!latest || isRestingMood(latestMood)) {
       await Notification.removePending([REMINDER_ID]);
       return;
@@ -2389,7 +2538,6 @@ async function scheduleCheckInReminder() {
     let when = adjustForQuietHours(
       new Date(latest + settings.reminderHours * 3600 * 1000),
     );
-    // Already overdue (you're looking at the app right now), so nothing to schedule
     if (when.getTime() <= Date.now() + 60 * 1000) {
       await Notification.removePending([REMINDER_ID]);
       return;
@@ -2425,7 +2573,6 @@ async function sendTestReminder() {
   }
 }
 
-// Reminders sheet -> save preferences
 async function saveSettingsFromUrl(url) {
   let q = parseQuery(url || "");
   let h = parseInt(q.h, 10);
@@ -2442,7 +2589,6 @@ async function saveSettingsFromUrl(url) {
   fm.writeString(settingsPath, JSON.stringify(settings, null, 2));
 }
 
-// ---- Friends: writing to several lists, switching, adding, managing ----
 async function notify(title, msg) {
   let a = new Alert();
   a.title = title;
@@ -2451,7 +2597,6 @@ async function notify(title, msg) {
   await a.present();
 }
 
-// "0,2" -> [0, 2] (valid, unique indices into circles)
 function parseTargets(csv) {
   let out = [];
   String(csv || "")
@@ -2464,7 +2609,6 @@ function parseTargets(csv) {
   return out;
 }
 
-// Friends whose lists get my check-ins by default
 function defaultTargets() {
   let t = [];
   circles.forEach((c, i) => {
@@ -2473,7 +2617,6 @@ function defaultTargets() {
   return t.length ? t : [activeCircle];
 }
 
-// Lists that also get my avatar and "what helps" cards (friends with sharing on)
 function shareCalendars() {
   let out = [];
   circles.forEach((c) => {
@@ -2484,7 +2627,6 @@ function shareCalendars() {
   return out;
 }
 
-// Writes one check-in into each chosen friend's list
 async function writeCheckins(indices, title, notes) {
   let done = 0;
   for (let i of indices) {
@@ -2518,7 +2660,6 @@ async function switchCircleFromUrl(url) {
   saveCircles();
 }
 
-// "Add a friend": connects to their list, or creates it if it doesn't exist yet
 async function addFriendFromUrl(url) {
   let q = parseQuery(url || "");
   let name = String(q.n || "")
@@ -2571,7 +2712,7 @@ async function addFriendFromUrl(url) {
           listN +
           '", tap the people icon (or ⓘ) and share it with ' +
           name +
-          ". On their phone they add you here using the same list name. If Reminders won't let you share it, create the list there under iCloud instead and add it here by name."
+          ". On their phone they add you here using the same list name."
       : 'Using the existing list "' +
           listN +
           '". Make sure ' +
@@ -2580,7 +2721,6 @@ async function addFriendFromUrl(url) {
   );
 }
 
-// Friends sheet -> sharing switches and removals (removing only forgets the friend in this app)
 async function saveFriendsFromUrl(url) {
   let q = parseQuery(url || "");
   let flags = String(q.s || "").split(",");
@@ -2590,7 +2730,7 @@ async function saveFriendsFromUrl(url) {
     .filter((x) => x !== "")
     .map((x) => parseInt(x, 10));
   if (del.some((i) => isNaN(i) || i < 0 || i >= circles.length)) return;
-  if (del.length >= circles.length) return; // keep at least one friend
+  if (del.length >= circles.length) return;
   let activePartner = circles[activeCircle].partner;
   let kept = [];
   circles.forEach((c, i) => {
@@ -2608,9 +2748,6 @@ async function saveFriendsFromUrl(url) {
   saveCircles();
 }
 
-// ---- Async Love: tiny "no reply needed" notes of support ----
-// Stored as a "Love: <Sender>" reminder (JSON in notes). There are no read receipts and
-// nothing is sent to the other phone: they see it next time they open the app or widget.
 const LOVE_PREFIX = "Love: ";
 const DAY_MS = 24 * 60 * 60 * 1000;
 const LOVE_MAX_PER_DAY = 3;
@@ -2645,7 +2782,6 @@ function parseLove(r) {
   }
 }
 
-// Notes I chose to hide (stored only on this phone: the sender never knows)
 function loadHiddenLove() {
   try {
     if (fm.fileExists(loveHiddenPath)) {
@@ -2677,7 +2813,6 @@ async function saveLoveFromUrl(url) {
   let now = Date.now();
   let me = myUserName.toLowerCase();
   let mine = all.map(parseLove).filter((l) => l && l.from.toLowerCase() === me);
-  // Housekeeping: my notes older than 14 days are removed from the list
   for (let l of mine) {
     if (now - l.t > 14 * DAY_MS && typeof l.r.remove === "function") {
       try {
@@ -2685,7 +2820,6 @@ async function saveLoveFromUrl(url) {
       } catch (e) {}
     }
   }
-  // A gentle daily limit keeps this a comfort, not a pressure
   if (mine.filter((l) => now - l.t < DAY_MS).length >= LOVE_MAX_PER_DAY) return;
   let r = new Reminder();
   r.title = LOVE_PREFIX + myUserName;
@@ -2698,7 +2832,6 @@ function saveMoodPresets() {
   fm.writeString(configPath, JSON.stringify(moods, null, 2));
 }
 
-// Custom Mood sheet -> adds a preset { title, energy }
 async function saveCustomFromUrl(url) {
   let q = parseQuery(url || "");
   let title = String(q.t || "")
@@ -2715,7 +2848,6 @@ async function saveCustomFromUrl(url) {
   saveMoodPresets();
 }
 
-// Manage Moods sheet -> applies energy edits and removals in one save
 async function saveManageFromUrl(url) {
   let q = parseQuery(url || "");
   let energies = String(q.e || "")
@@ -2756,7 +2888,6 @@ async function showMissingListAlert() {
   await a.present();
 }
 
-// Reads scroll position + expanded months from the page so a reload doesn't reset them
 const CAPTURE_STATE_JS =
   "JSON.stringify({y:window.scrollY,open:Array.prototype.slice.call(" +
   "document.querySelectorAll('.month-container')).filter(function(e){" +
@@ -2792,6 +2923,10 @@ async function runDashboard() {
   let wv = new WebView();
   wv.shouldAllowRequest = (req) => {
     let url = req.url || "";
+    if (url.indexOf("localhost/toggleTheme") !== -1) {
+      pending = "toggleTheme";
+      return false;
+    }
     if (url.indexOf("localhost/saveMood") !== -1) {
       pending = "saveMood";
       pendingUrl = url;
@@ -2847,7 +2982,6 @@ async function runDashboard() {
     }
     if (url.indexOf("localhost/hideLove") !== -1) {
       pending = "hideLove";
-      pendingUrl = url;
       return false;
     }
     if (url.indexOf("localhost/switch") !== -1) {
@@ -2885,6 +3019,7 @@ async function runDashboard() {
       pending = null;
       pendingUrl = null;
       let state = await captureState(wv);
+      if (action === "toggleTheme") await toggleThemeFromUrl();
       if (action === "saveMood") await saveMoodFromUrl(actionUrl);
       if (action === "saveCustom") await saveCustomFromUrl(actionUrl);
       if (action === "saveManage") await saveManageFromUrl(actionUrl);
@@ -2900,9 +3035,7 @@ async function runDashboard() {
       if (action === "switch") await switchCircleFromUrl(actionUrl);
       if (action === "addFriend") await addFriendFromUrl(actionUrl);
       if (action === "saveFriends") await saveFriendsFromUrl(actionUrl);
-      // Keep the "you haven't checked in" notification in step with whatever just changed
       await scheduleCheckInReminder();
-      // "refresh" has no action of its own: the reload below is the refresh
       if (!closed) {
         await wv.loadHTML(await buildHtml(state), "http://localhost/");
         await restoreScroll(wv, state);
@@ -2922,7 +3055,6 @@ if (!cal) {
     let res = await performQuickLog(quick);
     await scheduleCheckInReminder();
     if (quick.viaShortcut) {
-      // Run from Shortcuts / Back Tap / Action Button: log silently, no UI
       Script.setShortcutOutput(res.msg);
       skipDashboard = true;
     } else if (!res.ok) {

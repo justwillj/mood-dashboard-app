@@ -24,6 +24,43 @@ let cachePath = fm.joinPath(fm.documentsDirectory(), "mood_widget_cache.json");
 let myUserName = "You";
 let partnerUserName = "Partner";
 let listName = "Mood Dashboard";
+let currentTheme = "forest";
+
+const THEMES = {
+  forest: {
+    bg: "#121915",
+    card: "#1B241F",
+    cardSec: "#161D19",
+    accentMe: "#8DA399",
+    accentPartner: "#D97757",
+    dots: "#E0A96D",
+    text: "#F4F1EA",
+    textDim: "#A3ADA7",
+    textSub: "#75827A",
+  },
+  sand: {
+    bg: "#181513",
+    card: "#231F1C",
+    cardSec: "#1D1916",
+    accentMe: "#D69F54",
+    accentPartner: "#C26D53",
+    dots: "#E7B068",
+    text: "#F5EDE4",
+    textDim: "#A89F96",
+    textSub: "#7B736B",
+  },
+  midnight: {
+    bg: "#0B0C10",
+    card: "#1E1F29",
+    cardSec: "#171821",
+    accentMe: "#818CF8",
+    accentPartner: "#F472B6",
+    dots: "#00E5FF",
+    text: "#FFFFFF",
+    textDim: "#D1D5DB",
+    textSub: "#9CA3AF",
+  },
+};
 
 if (fm.fileExists(userConfigPath)) {
   try {
@@ -31,10 +68,15 @@ if (fm.fileExists(userConfigPath)) {
     myUserName = (userConfig.myUserName || "You").trim();
     partnerUserName = (userConfig.partnerUserName || "Partner").trim();
     listName = (userConfig.listName || "Mood Dashboard").trim();
+    if (userConfig.theme && THEMES[userConfig.theme]) {
+      currentTheme = userConfig.theme;
+    }
   } catch (e) {
     console.log("Could not read user_config.json, using defaults.");
   }
 }
+
+let activeTheme = THEMES[currentTheme] || THEMES.forest;
 
 // ---- Which friend? A widget parameter (a friend's name) wins, else the friend chosen in the dashboard ----
 const circlesPath = fm.joinPath(fm.documentsDirectory(), "mood_circles.json");
@@ -105,13 +147,18 @@ if (moodPresets.length === 0) {
 // ---- Conventions stored in the shared Reminders list (must match the dashboard) ----
 const NO_REPLY_MARK = "🔕 No reply needed"; // last line of a check-in's notes
 const DAY_MS = 24 * 60 * 60 * 1000;
+const CAP_MARK = "📊";
+const NEED_MARK = "🤝 Need:";
+const EDIT_MARK = "✏️ Edited:";
 
-// Reminders that store data (avatars, "Helps: <Name>" cards) rather than a mood check-in
+// Reminders that store data (avatars, help cards, love notes) rather than a mood check-in
 function isDataTitle(title) {
   let t = String(title || "")
     .toLowerCase()
     .trim();
-  return t.includes("avatar") || t.startsWith("helps:");
+  return (
+    t.includes("avatar") || t.startsWith("helps:") || t.startsWith("love:")
+  );
 }
 
 function isRestingMood(mood) {
@@ -120,9 +167,6 @@ function isRestingMood(mood) {
     .toLowerCase()
     .startsWith("🌙 resting");
 }
-
-// Capacity line "📊 Energy 3/5 · Social 2/5 · Sensory 4/5 · Talk: text" (must match the dashboard)
-const CAP_MARK = "📊";
 
 function parseCapLine(line) {
   let cap = {};
@@ -147,15 +191,28 @@ function splitNotes(raw) {
   let keep = [];
   let noReply = false;
   let cap = {};
+  let need = null;
+  let editedDate = null;
+
   String(raw || "")
     .split("\n")
     .forEach((line) => {
       let l = line.trim();
-      if (l === NO_REPLY_MARK) noReply = true;
-      else if (l.startsWith(CAP_MARK)) cap = parseCapLine(l);
-      else if (l) keep.push(l);
+      if (l === NO_REPLY_MARK) {
+        noReply = true;
+      } else if (l.startsWith(CAP_MARK)) {
+        cap = parseCapLine(l);
+      } else if (l.startsWith(NEED_MARK)) {
+        need = l.replace(NEED_MARK, "").trim().toLowerCase();
+      } else if (l.startsWith(EDIT_MARK)) {
+        let parsed = new Date(l.replace(EDIT_MARK, "").trim());
+        if (!isNaN(parsed.getTime())) editedDate = parsed;
+      } else if (l) {
+        keep.push(l);
+      }
     });
-  return { text: keep.join(" "), noReply: noReply, cap: cap };
+
+  return { text: keep.join(" "), noReply, cap, need, editedDate };
 }
 
 // Tiny capacity summary for tight spaces: "🔋2 🔊4 💬"
@@ -206,8 +263,7 @@ function presetEnergy(mood) {
   return p && p.energy != null ? p.energy : null;
 }
 
-// "Low lately" check for one person over the last 7 days (same rule as the dashboard):
-// a day averaging 2 or below is "low"; alert when 3+ days are low and they are 60%+ of days with data
+// "Low lately" check for one person over the last 7 days (same rule as the dashboard)
 function lowEnergyInfo(list, userName) {
   let today = new Date();
   today.setHours(0, 0, 0, 0);
@@ -309,7 +365,6 @@ try {
       return tb - ta;
     });
 
-    // The partner's "what helps" cards live in a "Helps: <Name>" reminder
     let helpsReminder = reminders.find((r) =>
       isHelpsTitleFor(r.title, partnerUserName),
     );
@@ -318,11 +373,10 @@ try {
     for (let r of reminders) {
       let title = r.title || "";
 
-      // Skip data reminders (avatars, help cards): they are not mood check-ins
+      // Skip data reminders (avatars, help cards, love notes)
       if (isDataTitle(title)) continue;
 
       let match = title.match(/^\[(.*?)\]\s*(.*)$/);
-
       let user = match ? match[1].trim() : "";
       let mood = match ? match[2].trim() : title.trim();
 
@@ -347,7 +401,6 @@ try {
     partnerTrend = lowEnergyInfo(reminders, partnerUserName);
     partnerLove = findLove(reminders, partnerUserName, myUserName);
 
-    // Only trust the result if we actually found something
     if (myLatest || partnerLatest) {
       fetchOk = true;
       fm.writeString(
@@ -385,7 +438,6 @@ let pStatusText = partnerLatest
   : "No Check-in";
 let pSplit = splitNotes(partnerLatest ? partnerLatest.note : "");
 let pResting = partnerLatest ? isRestingMood(partnerLatest.mood) : false;
-// 🔕 prefix = "no reply needed"; resting with no note says so
 let pNoteText = pSplit.noReply
   ? "🔕 " + (pSplit.text || "No reply needed")
   : pSplit.text || (pResting ? "No check-ins needed" : "");
@@ -393,13 +445,14 @@ let helpText = partnerLatest
   ? pickHelpText(partnerHelpsRaw, partnerLatest.mood)
   : "";
 
-// Older than 24h = amber time + dimmed mood (not when resting: silence is expected then)
+let mySplit = splitNotes(myLatest ? myLatest.note : "");
+
 function isOld(date) {
   return !!date && Date.now() - new Date(date).getTime() > DAY_MS;
 }
 let myResting = myLatest ? isRestingMood(myLatest.mood) : false;
 let pStale = partnerLatest && !pResting ? isOld(partnerLatest.date) : false;
-let myStale = false; // my own time never goes amber: a "you're behind" cue reads as guilt
+let myStale = false;
 const DIM_WHITE = new Color("#FFFFFF", 0.6);
 
 let pMatchedPreset = partnerLatest
@@ -419,12 +472,10 @@ let myStatusText = myLatest
   ? replaceCirclesWithFaces(myLatest.mood)
   : "No Status";
 
-// Time this script last actually ran (useful to see if iOS is refreshing)
 let ranFormatter = new DateFormatter();
 ranFormatter.dateFormat = "h:mm a";
 let ranAt = ranFormatter.string(new Date());
 
-// Adds a live-ticking "<prefix><relative time> ago" to a stack
 function formatRelativeTime(date) {
   if (!date) return "";
   let diffSec = Math.floor((new Date() - new Date(date)) / 1000);
@@ -436,12 +487,10 @@ function formatRelativeTime(date) {
   return Math.floor(diffHours / 24) + "d ago";
 }
 
-// Adds compact "<prefix>22h ago" text to a stack
 function addLiveTime(stack, date, size, hex, prefix, stale) {
   let label = date ? formatRelativeTime(date) : "--";
   let t = stack.addText((prefix || "") + label);
   t.font = Font.systemFont(size);
-  // Amber once it's been over 24 hours, like the dashboard
   t.textColor = stale ? new Color("#FBBF24", 0.9) : new Color(hex);
   t.lineLimit = 1;
 }
@@ -449,8 +498,7 @@ function addLiveTime(stack, date, size, hex, prefix, stale) {
 // ---- Widget builders ----
 function newBaseWidget() {
   let w = new ListWidget();
-  w.backgroundColor = new Color("#0B0C10");
-  // Tapping the widget opens and runs the dashboard script
+  w.backgroundColor = new Color(activeTheme.bg);
   w.url =
     "scriptable:///run/" +
     encodeURIComponent(dashboardScriptName) +
@@ -459,7 +507,7 @@ function newBaseWidget() {
   return w;
 }
 
-// SMALL (~158pt square): partner mood is the hero, "you" is one compact line
+// SMALL
 function buildSmallWidget() {
   let widget = newBaseWidget();
   widget.setPadding(12, 12, 12, 12);
@@ -470,7 +518,7 @@ function buildSmallWidget() {
 
   let name = topRow.addText(partnerUserName.toUpperCase());
   name.font = Font.boldSystemFont(9);
-  name.textColor = new Color("#F472B6");
+  name.textColor = new Color(activeTheme.accentPartner);
   name.lineLimit = 1;
   name.minimumScaleFactor = 0.7;
 
@@ -478,13 +526,13 @@ function buildSmallWidget() {
 
   let dots = topRow.addText(pEnergyDots);
   dots.font = Font.boldSystemFont(8);
-  dots.textColor = new Color("#00E5FF");
+  dots.textColor = new Color(activeTheme.dots);
 
   widget.addSpacer(6);
 
   let status = widget.addText(pStatusText);
   status.font = Font.boldSystemFont(15);
-  status.textColor = pStale ? DIM_WHITE : Color.white();
+  status.textColor = pStale ? DIM_WHITE : new Color(activeTheme.text);
   status.lineLimit = 2;
   status.minimumScaleFactor = 0.8;
 
@@ -492,7 +540,7 @@ function buildSmallWidget() {
     widget.addSpacer(3);
     let note = widget.addText(`"${pNoteText}"`);
     note.font = Font.italicSystemFont(10);
-    note.textColor = new Color("#D1D5DB");
+    note.textColor = new Color(activeTheme.textDim);
     note.lineLimit = 2;
     note.minimumScaleFactor = 0.85;
   }
@@ -505,13 +553,13 @@ function buildSmallWidget() {
 
   let youTag = youRow.addText("YOU");
   youTag.font = Font.boldSystemFont(8);
-  youTag.textColor = new Color("#818CF8");
+  youTag.textColor = new Color(activeTheme.accentMe);
 
   youRow.addSpacer(5);
 
   let youMood = youRow.addText(myStatusText);
   youMood.font = Font.semiboldSystemFont(10);
-  youMood.textColor = myStale ? DIM_WHITE : Color.white();
+  youMood.textColor = myStale ? DIM_WHITE : new Color(activeTheme.text);
   youMood.lineLimit = 1;
   youMood.minimumScaleFactor = 0.7;
 
@@ -523,7 +571,7 @@ function buildSmallWidget() {
     timeRow,
     partnerLatest ? partnerLatest.date : null,
     8,
-    "#9CA3AF",
+    activeTheme.textSub,
     pResting ? "Resting since " : "Updated ",
     pStale,
   );
@@ -531,7 +579,7 @@ function buildSmallWidget() {
   return widget;
 }
 
-// MEDIUM (and LARGE, which reuses it and pins content to the top)
+// MEDIUM & LARGE
 function buildMediumWidget(isLarge) {
   let widget = newBaseWidget();
   widget.setPadding(14, 16, 14, 16);
@@ -541,11 +589,10 @@ function buildMediumWidget(isLarge) {
 
   let headerTitle = headerStack.addText("MOOD DASHBOARD");
   headerTitle.font = Font.boldSystemFont(10);
-  headerTitle.textColor = new Color("#818CF8");
+  headerTitle.textColor = new Color(activeTheme.accentMe);
 
   headerStack.addSpacer();
 
-  // A note of love from my friend replaces the refresh time (no reply needed)
   let ranLabel = headerStack.addText(
     partnerLove
       ? "💌 " + partnerLove.emoji + " from " + partnerUserName
@@ -553,14 +600,14 @@ function buildMediumWidget(isLarge) {
   );
   ranLabel.font = Font.systemFont(8);
   ranLabel.textColor = partnerLove
-    ? new Color("#F9A8D4")
-    : new Color("#6B7280");
+    ? new Color(activeTheme.accentPartner)
+    : new Color(activeTheme.textSub);
 
   widget.addSpacer(8);
 
   let partnerCard = widget.addStack();
   partnerCard.layoutVertically();
-  partnerCard.backgroundColor = new Color("#1E1F29");
+  partnerCard.backgroundColor = new Color(activeTheme.card);
   partnerCard.cornerRadius = 14;
   partnerCard.setPadding(10, 12, 10, 12);
 
@@ -570,30 +617,29 @@ function buildMediumWidget(isLarge) {
 
   let pNameLabel = pRow1.addText(partnerUserName.toUpperCase());
   pNameLabel.font = Font.boldSystemFont(10);
-  pNameLabel.textColor = new Color("#F472B6");
+  pNameLabel.textColor = new Color(activeTheme.accentPartner);
 
   pRow1.addSpacer();
 
   let pDots = pRow1.addText(pEnergyDots);
   pDots.font = Font.boldSystemFont(9);
-  pDots.textColor = new Color("#00E5FF");
+  pDots.textColor = new Color(activeTheme.dots);
 
   partnerCard.addSpacer(3);
 
   let pStatus = partnerCard.addText(pStatusText);
   pStatus.font = Font.boldSystemFont(14);
-  pStatus.textColor = pStale ? DIM_WHITE : Color.white();
+  pStatus.textColor = pStale ? DIM_WHITE : new Color(activeTheme.text);
   pStatus.lineLimit = 1;
 
   if (pNoteText) {
     partnerCard.addSpacer(2);
     let pNote = partnerCard.addText(`"${pNoteText}"`);
     pNote.font = Font.italicSystemFont(10);
-    pNote.textColor = new Color("#D1D5DB");
+    pNote.textColor = new Color(activeTheme.textDim);
     pNote.lineLimit = 1;
   }
 
-  // 💡 the partner's "what helps" card (medium: only if there's room, large: always)
   if (helpText && (isLarge || !pNoteText)) {
     partnerCard.addSpacer(2);
     let pHelp = partnerCard.addText("💡 " + helpText);
@@ -606,16 +652,15 @@ function buildMediumWidget(isLarge) {
 
   let pTimeRow = partnerCard.addStack();
   pTimeRow.layoutHorizontally();
-  addLiveTime(
-    pTimeRow,
-    partnerLatest ? partnerLatest.date : null,
-    8,
-    "#9CA3AF",
-    pResting ? "Resting since " : "Updated ",
-    pStale,
-  );
+  let pTimeLabel = (pResting ? "Resting since " : "Updated ") + (partnerLatest && partnerLatest.date ? formatRelativeTime(partnerLatest.date) : "--");
+  if (pSplit.editedDate) {
+    pTimeLabel += " · ✏️ " + formatRelativeTime(pSplit.editedDate);
+  }
+  let pTimeText = pTimeRow.addText(pTimeLabel);
+  pTimeText.font = Font.systemFont(8);
+  pTimeText.textColor = pStale ? new Color("#FBBF24", 0.9) : new Color(activeTheme.textSub);
+  pTimeText.lineLimit = 1;
 
-  // Right side: capacity (🔋 social, 🔊 sensory, talking) and a "low lately" heads-up
   let showTrend = !pResting && !!partnerTrend;
   let pRight = [
     capCompact(pSplit.cap),
@@ -637,40 +682,40 @@ function buildMediumWidget(isLarge) {
   let myCard = widget.addStack();
   myCard.layoutHorizontally();
   myCard.centerAlignContent();
-  myCard.backgroundColor = new Color("#171821");
+  myCard.backgroundColor = new Color(activeTheme.cardSec);
   myCard.cornerRadius = 10;
   myCard.setPadding(8, 10, 8, 10);
 
   let myTag = myCard.addText("YOU");
   myTag.font = Font.boldSystemFont(9);
-  myTag.textColor = new Color("#818CF8");
+  myTag.textColor = new Color(activeTheme.accentMe);
 
   myCard.addSpacer(8);
 
   let myMood = myCard.addText(myStatusText);
   myMood.font = Font.semiboldSystemFont(11);
-  myMood.textColor = myStale ? DIM_WHITE : Color.white();
+  myMood.textColor = myStale ? DIM_WHITE : new Color(activeTheme.text);
   myMood.lineLimit = 1;
 
   myCard.addSpacer();
 
   let myTimeRow = myCard.addStack();
   myTimeRow.layoutHorizontally();
-  addLiveTime(
-    myTimeRow,
-    myLatest ? myLatest.date : null,
-    8,
-    "#6B7280",
-    "",
-    myStale,
-  );
+  let myTimeLabel = (myLatest && myLatest.date ? formatRelativeTime(myLatest.date) : "--");
+  if (mySplit.editedDate) {
+    myTimeLabel += " · ✏️ " + formatRelativeTime(mySplit.editedDate);
+  }
+  let myTimeText = myTimeRow.addText(myTimeLabel);
+  myTimeText.font = Font.systemFont(8);
+  myTimeText.textColor = new Color(activeTheme.textSub);
+  myTimeText.lineLimit = 1;
 
   if (isLarge) widget.addSpacer();
 
   return widget;
 }
 
-// ---- Pick size: real family in a widget, a chooser when run in the app ----
+// ---- Pick size ----
 let family = "medium";
 let cancelled = false;
 
