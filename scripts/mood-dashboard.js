@@ -1,242 +1,99 @@
 // Variables used by Scriptable.
 // These must be at the very top of the file. Do not edit.
 // icon-color: purple; icon-glyph: chart-line;
-// Variables used by Scriptable.
-// These must be at the very top of the file. Do not edit.
-// icon-color: purple; icon-glyph: chart-line;
-// Variables used by Scriptable.
-// These must be at the very top of the file. Do not edit.
-// icon-color: purple; icon-glyph: chart-line;
+
 // ==========================================
-// MOOD DASHBOARD (REDESIGNED LAYOUT & SAFE AVATAR SYNC)
+// MOOD DASHBOARD
+// Shared logic (storage, themes, Reminders protocol, analytics) lives in
+// mood-core.js. This file is the app UI: WebView, actions and writes.
 // ==========================================
 
-let fm = FileManager.iCloud();
-try {
-  fm.documentsDirectory();
-} catch (e) {
-  fm = FileManager.local();
-}
+const core = importModule("mood-core");
+const {
+  DAY_MS,
+  LOVE_MAX_PER_DAY,
+  REST_TITLE,
+  HELPS_PREFIX,
+  LOVE_PREFIX,
+  NEEDS,
+  LOVE_KINDS,
+  MONTHS,
+  getTime,
+  parseMood,
+  isAvatarFor,
+  isHelpsFor,
+  isDataTitle,
+  isRestingMood,
+  avatarDataUri,
+  splitNotes,
+  buildNotes,
+  capFromQuery,
+  sanitizeHelps,
+  parseHelps,
+  parseLove,
+  summarizeTrend,
+  faceify,
+  formatDate,
+  relTime,
+  isStale,
+} = core;
 
-const userConfigPath = fm.joinPath(fm.documentsDirectory(), "user_config.json");
-
-// --- THEME PALETTES ---
-const THEMES = {
-  forest: {
-    id: "forest",
-    name: "Forest & Sage",
-    bg: "#121915",
-    card: "#1B241F",
-    cardSec: "#161D19",
-    heroMe: "#1A2620",
-    heroPartner: "#241D1A",
-    accentMe: "#8DA399",
-    accentPartner: "#D97757",
-    dots: "#E0A96D",
-    text: "#F4F1EA",
-    textDim: "#A3ADA7",
-    textSub: "#75827A",
-    border: "rgba(167, 196, 181, 0.15)",
-    borderPartner: "rgba(217, 119, 87, 0.3)",
-    btnPrimary: "#4F6D60",
-    btnPrimaryBorder: "#628576",
-  },
-  sand: {
-    id: "sand",
-    name: "Warm Sand & Clay",
-    bg: "#181513",
-    card: "#231F1C",
-    cardSec: "#1D1916",
-    heroMe: "#26211C",
-    heroPartner: "#281D1A",
-    accentMe: "#D69F54",
-    accentPartner: "#C26D53",
-    dots: "#E7B068",
-    text: "#F5EDE4",
-    textDim: "#A89F96",
-    textSub: "#7B736B",
-    border: "rgba(214, 159, 84, 0.15)",
-    borderPartner: "rgba(194, 109, 83, 0.38)",
-    btnPrimary: "#7E5835",
-    btnPrimaryBorder: "#966B43",
-  },
-  midnight: {
-    id: "midnight",
-    name: "Midnight Neon",
-    bg: "#0B0C10",
-    card: "#1E1F29",
-    cardSec: "#171821",
-    heroMe: "rgba(255,255,255,0.08)",
-    heroPartner: "rgba(255,255,255,0.08)",
-    accentMe: "#818CF8",
-    accentPartner: "#F472B6",
-    dots: "#00E5FF",
-    text: "#FFFFFF",
-    textDim: "rgba(255,255,255,0.6)",
-    textSub: "rgba(255,255,255,0.45)",
-    border: "rgba(255,255,255,0.12)",
-    borderPartner: "rgba(236,72,153,0.3)",
-    btnPrimary: "#6366F1",
-    btnPrimaryBorder: "#6366F1",
-  },
-};
-
-let currentTheme = "forest"; // Default theme
-
+// ---- User config + theme ----
+let currentTheme = "forest";
 let myUserName = "You";
 let partnerUserName = "Partner";
 let listName = "Mood Dashboard";
-
-if (fm.fileExists(userConfigPath)) {
-  try {
-    let config = JSON.parse(fm.readString(userConfigPath));
-    myUserName = (config.myUserName || "You").trim();
-    partnerUserName = (config.partnerUserName || "Partner").trim();
-    listName = (config.listName || "Mood Dashboard").trim();
-    if (config.theme && THEMES[config.theme]) {
-      currentTheme = config.theme;
-    }
-  } catch (e) {
-    console.log("Could not read user_config.json, using defaults.");
-  }
+{
+  const cfg = await core.loadUserConfig();
+  myUserName = cfg.myUserName;
+  partnerUserName = cfg.partnerUserName;
+  listName = cfg.listName;
+  currentTheme = cfg.theme;
 }
-
-// Active theme shortcut
-let activeTheme = THEMES[currentTheme] || THEMES.forest;
+let activeTheme = core.getTheme(currentTheme);
 
 async function toggleThemeFromUrl() {
-  const themeOrder = ["forest", "sand", "midnight"];
-  let nextIdx = (themeOrder.indexOf(currentTheme) + 1) % themeOrder.length;
-  currentTheme = themeOrder[nextIdx];
-  activeTheme = THEMES[currentTheme];
-
-  // Save to user_config.json so widgets can also read it
+  currentTheme = core.nextThemeName(currentTheme);
+  activeTheme = core.getTheme(currentTheme);
   try {
-    let cfg = {};
-    if (fm.fileExists(userConfigPath)) {
-      cfg = JSON.parse(fm.readString(userConfigPath)) || {};
-    }
-    cfg.myUserName = myUserName;
-    cfg.partnerUserName = partnerUserName;
-    cfg.listName = listName;
-    cfg.theme = currentTheme;
-    fm.writeString(userConfigPath, JSON.stringify(cfg, null, 2));
+    await core.saveUserConfig({
+      myUserName: myUserName,
+      partnerUserName: partnerUserName,
+      listName: listName,
+      theme: currentTheme,
+    });
   } catch (e) {
     console.log("Failed to save theme: " + e.message);
   }
 }
 
-const configPath = fm.joinPath(fm.documentsDirectory(), "mood_presets.json");
+// ---- Mood presets (an empty saved list stays empty here) ----
+let moods = await core.loadPresets(true);
+if (!core.fileExists(core.FILES.presets)) core.savePresets(moods);
 
-const defaults = [
-  { title: "🟢 Locked In", energy: 5 },
-  { title: "⚡ Focused", energy: 4 },
-  { title: "🟣 Creative", energy: 3 },
-  { title: "🟡 Chill", energy: 2 },
-  { title: "☕ Cozy", energy: 2 },
-  { title: "🔴 Low Battery", energy: 1 },
-];
-
-let rawMoods = defaults;
-if (fm.fileExists(configPath)) {
-  try {
-    let parsedMoods = JSON.parse(fm.readString(configPath));
-    if (Array.isArray(parsedMoods)) rawMoods = parsedMoods;
-  } catch (e) {
-    console.log(
-      "Could not parse mood_presets.json, using defaults: " + e.message,
-    );
-  }
-}
-let moods = rawMoods.map((m) =>
-  typeof m === "string" ? { title: m, energy: 3 } : m,
-);
-
-if (!fm.fileExists(configPath)) {
-  fm.writeString(configPath, JSON.stringify(defaults, null, 2));
-}
-
-// ---- Check-in reminder settings (stored in mood_settings.json) ----
-const settingsPath = fm.joinPath(fm.documentsDirectory(), "mood_settings.json");
-let settings = {
-  reminderHours: 0,
-  quietEnabled: true,
-  quietStart: 22,
-  quietEnd: 8,
-};
-
-function clampInt(v, lo, hi, fallback) {
-  let n = parseInt(v, 10);
-  return isNaN(n) ? fallback : Math.max(lo, Math.min(hi, n));
-}
-
-if (fm.fileExists(settingsPath)) {
-  try {
-    let saved = JSON.parse(fm.readString(settingsPath));
-    settings = {
-      reminderHours: clampInt(saved.reminderHours, 0, 168, 0),
-      quietEnabled: saved.quietEnabled !== false,
-      quietStart: clampInt(saved.quietStart, 0, 23, 22),
-      quietEnd: clampInt(saved.quietEnd, 0, 23, 8),
-    };
-  } catch (e) {
-    console.log("Could not read mood_settings.json, using defaults.");
-  }
-}
+// ---- Check-in reminder settings ----
+let settings = await core.loadSettings();
 
 let calendars = await Calendar.forReminders();
 
 function findCalendar(name) {
-  let n = String(name || "")
-    .trim()
-    .toLowerCase();
-  return calendars.find((c) => c.title.trim().toLowerCase() === n) || null;
+  return core.findCalendar(calendars, name);
 }
 
 // ---- Friends ("circles"): each friend has their OWN shared Reminders list ----
-const circlesPath = fm.joinPath(fm.documentsDirectory(), "mood_circles.json");
 let circles = [];
 let activeCircle = 0;
-
-function cleanCircle(c) {
-  if (!c || typeof c.partner !== "string" || typeof c.list !== "string")
-    return null;
-  let partner = c.partner.trim().slice(0, 40);
-  let list = c.list.trim().slice(0, 80);
-  if (!partner || !list) return null;
-  return { partner: partner, list: list, autoShare: c.autoShare !== false };
-}
-
-function loadCircles() {
-  let list = [];
-  let active = 0;
-  if (fm.fileExists(circlesPath)) {
-    try {
-      let saved = JSON.parse(fm.readString(circlesPath));
-      let seen = {};
-      (Array.isArray(saved.circles) ? saved.circles : []).forEach((c) => {
-        let cc = cleanCircle(c);
-        if (cc && !seen[cc.partner.toLowerCase()]) {
-          seen[cc.partner.toLowerCase()] = true;
-          list.push(cc);
-        }
-      });
-      active = clampInt(saved.active, 0, Math.max(0, list.length - 1), 0);
-    } catch (e) {
-      console.log("Could not read mood_circles.json, using defaults.");
-    }
-  }
-  if (!list.length)
-    list = [{ partner: partnerUserName, list: listName, autoShare: true }];
-  circles = list;
-  activeCircle = active;
+{
+  const loaded = await core.loadCircles({
+    partnerUserName: partnerUserName,
+    listName: listName,
+  });
+  circles = loaded.circles;
+  activeCircle = loaded.active;
 }
 
 function saveCircles() {
-  fm.writeString(
-    circlesPath,
-    JSON.stringify({ circles: circles, active: activeCircle }, null, 2),
-  );
+  core.saveCircles(circles, activeCircle);
 }
 
 let cal = null;
@@ -245,7 +102,6 @@ function applyActiveCircle() {
   cal = findCalendar(circles[activeCircle].list);
 }
 
-loadCircles();
 applyActiveCircle();
 
 {
@@ -260,22 +116,6 @@ applyActiveCircle();
       saveCircles();
     }
   }
-}
-
-function getAvatarBase64FromNotes(reminder) {
-  if (
-    !reminder ||
-    !reminder.notes ||
-    !reminder.notes.startsWith("data:image")
-  ) {
-    return null;
-  }
-  return reminder.notes;
-}
-
-function isAvatarFor(reminder, name) {
-  let title = ((reminder && reminder.title) || "").trim().toLowerCase();
-  return title === (name + " avatar").trim().toLowerCase();
 }
 
 async function changeMyAvatar() {
@@ -302,7 +142,7 @@ async function changeMyAvatar() {
     let base64String = "data:image/jpeg;base64," + jpegData.toBase64String();
 
     for (let k of shareCalendars()) {
-      let allReminders = await Reminder.all([k]);
+      let allReminders = await core.fetchReminders(k);
       let myAvatarReminder = allReminders.find((r) =>
         isAvatarFor(r, myUserName),
       );
@@ -321,21 +161,6 @@ async function changeMyAvatar() {
   }
 }
 
-const MONTHS = [
-  "January",
-  "February",
-  "March",
-  "April",
-  "May",
-  "June",
-  "July",
-  "August",
-  "September",
-  "October",
-  "November",
-  "December",
-];
-
 const esc = (s) =>
   String(s).replace(
     /[&<>"']/g,
@@ -346,153 +171,14 @@ const esc = (s) =>
   );
 
 const sleep = (ms) => new Promise((r) => Timer.schedule(ms, false, r));
-const getTime = (r) =>
-  r.creationDate ? new Date(r.creationDate).getTime() : 0;
-
-function formatDate(d) {
-  if (!d) return "Just now";
-  let date = new Date(d);
-  let df = new DateFormatter();
-  if (date.toDateString() === new Date().toDateString()) {
-    df.dateFormat = "'Today' h:mm a";
-  } else {
-    df.dateFormat = "MMM d, h:mm a";
-  }
-  return df.string(date);
-}
-
-function parseMood(title) {
-  let match = title.match(/^\[(.*?)\]\s*(.*)$/);
-  if (match) return { user: match[1], mood: match[2] };
-  return { user: "Unknown", mood: title };
-}
-
-// ---- Conventions stored in the shared Reminders list ----
-const NO_REPLY_MARK = "🔕 No reply needed";
-const REST_TITLE = "🌙 Resting";
-const CAP_MARK = "📊";
-const NEED_MARK = "🤝 Need:";
-const EDIT_MARK = "✏️ Edited:";
-const NEEDS = {
-  space: { icon: "🎧", full: "🎧 Space & quiet" },
-  parallel: { icon: "🛋️", full: "🛋️ Parallel play (no talking)" },
-  distract: { icon: "💬", full: "💬 Distraction / memes" },
-  comfort: { icon: "🫂", full: "🫂 Comfort & warmth" },
-  advice: { icon: "💡", full: "💡 Advice wanted" },
-};
 
 function needPillHtml(need) {
   if (!need || !NEEDS[need]) return "";
   return '<div class="need-pill">' + esc(NEEDS[need].full) + "</div>";
 }
 
-const HELPS_PREFIX = "Helps: ";
-
-function isDataTitle(title) {
-  let t = String(title || "")
-    .toLowerCase()
-    .trim();
-  return (
-    t.includes("avatar") || t.startsWith("helps:") || t.startsWith("love:")
-  );
-}
-
-function isRestingMood(mood) {
-  return String(mood || "")
-    .trim()
-    .toLowerCase()
-    .startsWith("🌙 resting");
-}
-
-function parseCapLine(line) {
-  let cap = {};
-  String(line)
-    .replace(CAP_MARK, "")
-    .split("·")
-    .forEach((part) => {
-      let p = part.trim();
-      let m = p.match(/^(Energy|Social|Sensory)\s+([1-5])\/5$/i);
-      if (m) {
-        cap[m[1].toLowerCase()] = parseInt(m[2], 10);
-        return;
-      }
-      let t = p.match(/^Talk:\s*(ok|text|none)$/i);
-      if (t) cap.talk = t[1].toLowerCase();
-    });
-  return cap;
-}
-
-function formatCapLine(cap) {
-  if (!cap) return "";
-  let parts = [];
-  if (cap.energy != null) parts.push("Energy " + cap.energy + "/5");
-  if (cap.social != null) parts.push("Social " + cap.social + "/5");
-  if (cap.sensory != null) parts.push("Sensory " + cap.sensory + "/5");
-  if (cap.talk) parts.push("Talk: " + cap.talk);
-  return parts.length ? CAP_MARK + " " + parts.join(" · ") : "";
-}
-
-function splitNotes(raw) {
-  let keep = [];
-  let noReply = false;
-  let cap = {};
-  let need = null;
-  let editedDate = null;
-
-  String(raw || "")
-    .split("\n")
-    .forEach((line) => {
-      let l = line.trim();
-      if (l === NO_REPLY_MARK) {
-        noReply = true;
-      } else if (l.startsWith(CAP_MARK)) {
-        cap = parseCapLine(l);
-      } else if (l.startsWith(NEED_MARK)) {
-        need = l.replace(NEED_MARK, "").trim().toLowerCase();
-      } else if (l.startsWith(EDIT_MARK)) {
-        let parsed = new Date(l.replace(EDIT_MARK, "").trim());
-        if (!isNaN(parsed.getTime())) editedDate = parsed;
-      } else if (l) {
-        keep.push(l);
-      }
-    });
-
-  return { text: keep.join(" "), noReply, cap, need, editedDate };
-}
-
-function buildNotes(text, noReply, cap, need, editedDate) {
-  let clean = String(text || "")
-    .split("\n")
-    .map((l) => l.trim())
-    .filter((l) => l && l !== NO_REPLY_MARK && !l.startsWith(CAP_MARK) && !l.startsWith(NEED_MARK) && !l.startsWith(EDIT_MARK))
-    .join(" ");
-  let lines = [];
-  if (clean) lines.push(clean);
-  if (need) lines.push(NEED_MARK + " " + need);
-  let capLine = formatCapLine(cap);
-  if (capLine) lines.push(capLine);
-  if (editedDate) lines.push(EDIT_MARK + " " + new Date(editedDate).toISOString());
-  if (noReply) lines.push(NO_REPLY_MARK);
-  return lines.join("\n");
-}
-
-function capFromQuery(q) {
-  let cap = {};
-  let soc = parseInt(q.soc, 10);
-  let sen = parseInt(q.sen, 10);
-  if (soc >= 1 && soc <= 5) cap.social = soc;
-  if (sen >= 1 && sen <= 5) cap.sensory = sen;
-  if (["ok", "text", "none"].indexOf(q.talk) !== -1) cap.talk = q.talk;
-  return cap;
-}
-
 function energyOfTitle(title) {
-  if (isRestingMood(title)) return null;
-  let key = String(title || "")
-    .trim()
-    .toLowerCase();
-  let p = moods.find((m) => String(m.title).trim().toLowerCase() === key);
-  return p && p.energy != null ? Math.max(1, Math.min(5, p.energy)) : null;
+  return core.energyOfTitle(title, moods);
 }
 
 function capChipsHtml(cap) {
@@ -532,183 +218,14 @@ function capChipsHtml(cap) {
     : "";
 }
 
-const LOW_ENERGY = 2;
-
-function dayKey(d) {
-  return d.getFullYear() + "-" + d.getMonth() + "-" + d.getDate();
-}
-function avgOf(a) {
-  return a.length ? a.reduce((x, y) => x + y, 0) / a.length : null;
-}
-function round1(n) {
-  return n == null ? null : Math.round(n * 10) / 10;
-}
-
-function collectEntries(list, userName) {
-  let out = [];
-  for (let r of list) {
-    if (isDataTitle(r.title) || !r.creationDate) continue;
-    let p = parseMood(r.title || "");
-    if (p.user.toLowerCase() !== userName.toLowerCase()) continue;
-    let ns = splitNotes(r.notes);
-    let resting = isRestingMood(p.mood);
-    let energy = null;
-    if (!resting)
-      energy = ns.cap.energy != null ? ns.cap.energy : energyFor(p.mood);
-    out.push({
-      t: new Date(r.creationDate).getTime(),
-      energy: energy,
-      resting: resting,
-      social: ns.cap.social != null ? ns.cap.social : null,
-      sensory: ns.cap.sensory != null ? ns.cap.sensory : null,
-      talk: ns.cap.talk || null,
-    });
-  }
-  return out;
-}
-
-function summarizeTrend(entries, R) {
-  let groups = {};
-  entries.forEach((e) => {
-    let k = dayKey(new Date(e.t));
-    (groups[k] = groups[k] || []).push(e);
-  });
-  let today = new Date();
-  today.setHours(0, 0, 0, 0);
-
-  function dayInfo(offset) {
-    let d = new Date(today);
-    d.setDate(d.getDate() - offset);
-    let g = groups[dayKey(d)] || [];
-    let es = g.filter((e) => e.energy != null).map((e) => e.energy);
-    return {
-      l: MONTHS[d.getMonth()].slice(0, 3) + " " + d.getDate(),
-      c: g.length,
-      e: es.length ? round1(avgOf(es)) : null,
-      r: g.some((e) => e.resting) ? 1 : 0,
-      soc: g.filter((e) => e.social != null).map((e) => e.social),
-      sen: g.filter((e) => e.sensory != null).map((e) => e.sensory),
-      cant: g.some((e) => e.talk === "none") ? 1 : 0,
-    };
-  }
-  let days = [];
-  for (let i = R - 1; i >= 0; i--) days.push(dayInfo(i));
-  let prev = [];
-  for (let i = 2 * R - 1; i >= R; i--) prev.push(dayInfo(i));
-  let last7 = [];
-  for (let i = 6; i >= 0; i--) last7.push(dayInfo(i));
-
-  let lowOf = (a) => a.filter((x) => x.e != null && x.e <= LOW_ENERGY).length;
-  let withE = (a) => a.filter((x) => x.e != null);
-  let flat = (a, k) => a.reduce((acc, x) => acc.concat(x[k]), []);
-
-  let low7 = lowOf(last7);
-  let withE7 = withE(last7).length;
-  let alert =
-    low7 >= 3 && withE7 > 0 && low7 >= 0.6 * withE7
-      ? { low: low7, days: 7 }
-      : null;
-
-  let socAll = flat(days, "soc");
-  let senAll = flat(days, "sen");
-  let prevE = withE(prev);
-  return {
-    days: days.map((x) => ({ l: x.l, c: x.c, e: x.e, r: x.r })),
-    stats: {
-      checkin: days.filter((x) => x.c > 0).length,
-      total: R,
-      avg: round1(avgOf(withE(days).map((x) => x.e))),
-      prev: prevE.length ? round1(avgOf(prevE.map((x) => x.e))) : null,
-      low: lowOf(days),
-      withE: withE(days).length,
-      rest: days.filter((x) => x.r).length,
-      soc: round1(avgOf(socAll)),
-      socN: socAll.length,
-      sen: round1(avgOf(senAll)),
-      senN: senAll.length,
-      cant: days.filter((x) => x.cant).length,
-    },
-    alert: alert,
-  };
-}
-
-function isHelpsFor(reminder, name) {
-  let t = ((reminder && reminder.title) || "").trim().toLowerCase();
-  return t === (HELPS_PREFIX + name).trim().toLowerCase();
-}
-
-function sanitizeHelps(list) {
-  let out = [];
-  let seen = {};
-  for (let c of list) {
-    if (!c || typeof c.m !== "string" || typeof c.t !== "string") continue;
-    let m = c.m.trim().slice(0, 80);
-    let t = c.t.trim().slice(0, 240);
-    if (!m || !t) continue;
-    let k = m.toLowerCase();
-    if (seen[k]) continue;
-    seen[k] = true;
-    out.push({ m: m, t: t });
-    if (out.length >= 30) break;
-  }
-  return out;
-}
-
-function parseHelps(reminder) {
-  if (!reminder || !reminder.notes) return [];
-  try {
-    let list = JSON.parse(reminder.notes);
-    return Array.isArray(list) ? sanitizeHelps(list) : [];
-  } catch (e) {
-    return [];
-  }
-}
-
-function faceify(text) {
-  return String(text || "")
-    .replace(/🟢/g, "😤")
-    .replace(/🔴/g, "🪫")
-    .replace(/🟡/g, "😌")
-    .replace(/🟣/g, "🎨")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function relTime(d) {
-  if (!d) return "--";
-  let sec = Math.floor((Date.now() - new Date(d).getTime()) / 1000);
-  if (sec < 60) return "Just now";
-  let min = Math.floor(sec / 60);
-  if (min < 60) return min + "m ago";
-  let hrs = Math.floor(min / 60);
-  if (hrs < 24) return hrs + "h ago";
-  let days = Math.floor(hrs / 24);
-  if (days < 7) return days + "d ago";
-  return formatDate(d);
-}
-
-function isStale(d) {
-  return d ? Date.now() - new Date(d).getTime() > 24 * 3600 * 1000 : false;
-}
-
 function energyFor(mood) {
-  let m = String(mood || "")
-    .trim()
-    .toLowerCase();
-  if (!m) return null;
-  let p =
-    moods.find((x) => String(x.title).trim().toLowerCase() === m) ||
-    moods.find((x) => String(x.title).toLowerCase().indexOf(m) !== -1);
-  return p && p.energy != null ? p.energy : null;
+  return core.energyFor(mood, moods);
 }
 
 function energyDotsHtml(mood, forced) {
   let e = forced != null ? forced : energyFor(mood);
   if (e == null) return "";
-  let lvl = Math.max(1, Math.min(5, e));
-  return (
-    '<span class="dots">' + "●".repeat(lvl) + "○".repeat(5 - lvl) + "</span>"
-  );
+  return '<span class="dots">' + core.energyDots(e) + "</span>";
 }
 
 let myLatestReminderRef = null;
@@ -716,6 +233,14 @@ let helpsState = { mine: [], partner: [], pKey: "", pMood: "" };
 let trendState = { names: ["", ""], me: {}, partner: {} };
 let entriesState = {};
 let loveState = { sent: 0, max: 3, to: "" };
+
+// Performance optimization caches
+let cachedFriendBarData = null;
+let cachedFriendBarTime = 0;
+const FRIEND_BAR_TTL = 3 * 60 * 1000;
+
+let cachedTrendState = null;
+let cachedTrendKey = "";
 
 function buildMockData() {
   let now = new Date();
@@ -1018,8 +543,8 @@ function openLog() {
   $("noteInput").value = "";
   $("logBtn").disabled = true;
   nr[0] = false;
-  renderNr();
   needSel[0] = "";
+  renderNr();
   renderNeeds(0);
   resetCap(0, [0, 0, 0]);
   renderPick();
@@ -1056,8 +581,8 @@ function openEdit(id) {
   editSel = e.idx;
   $("editNote").value = e.note;
   nr[1] = !!e.nr;
-  renderNr();
   needSel[1] = e.need || "";
+  renderNr();
   renderNeeds(1);
   resetCap(1, e.cap);
   $("editSub").textContent = "Currently " + e.mood + " · " + e.time + (e.editedTime ? " · ✏️ edited " + e.editedTime : "");
@@ -1469,42 +994,145 @@ function submitManage() {
   );
 }
 
+function collectParsedEntries(items, userNameLower) {
+  let out = [];
+  for (let item of items) {
+    if (item.userLower !== userNameLower || !item.creationDate) continue;
+    out.push({
+      t: item.time,
+      energy: item.energy,
+      resting: item.resting,
+      social:
+        item.parsedNotes.cap.social != null
+          ? item.parsedNotes.cap.social
+          : null,
+      sensory:
+        item.parsedNotes.cap.sensory != null
+          ? item.parsedNotes.cap.sensory
+          : null,
+      talk: item.parsedNotes.cap.talk || null,
+    });
+  }
+  return out;
+}
+
 async function buildHtml(state) {
-  let allReminders = await Reminder.all([cal]);
+  let allReminders = await core.fetchReminders(cal);
   if (!allReminders || allReminders.length === 0)
     allReminders = buildMockData();
 
-  // Gather latest mood status for each friend in the top bar
+  // Optimizations 2 & 3: Parallel fetch and cache for friend bar
   let friendBarData = {};
-  for (let c of circles) {
-    let fCal = findCalendar(c.list);
-    if (!fCal) continue;
-    try {
-      let fRems = (cal && fCal.identifier === cal.identifier) ? allReminders : await Reminder.all([fCal]);
-      let fLatest = fRems
-        .filter((r) => !isDataTitle(r.title) && parseMood(r.title).user.toLowerCase() === c.partner.toLowerCase())
-        .sort((a, b) => getTime(b) - getTime(a))[0];
-      if (fLatest) {
-        let fp = parseMood(fLatest.title);
-        let token = faceify(fp.mood).split(" ")[0] || "●";
-        let isRecent = fLatest.creationDate && (Date.now() - new Date(fLatest.creationDate).getTime() < 6 * 3600 * 1000);
-        friendBarData[c.partner.toLowerCase()] = { token, isRecent };
-      }
-    } catch (e) {}
+  let now = Date.now();
+  if (cachedFriendBarData && now - cachedFriendBarTime < FRIEND_BAR_TTL) {
+    friendBarData = cachedFriendBarData;
+  } else {
+    const circleFetches = circles.map(async (c) => {
+      let fCal = findCalendar(c.list);
+      if (!fCal) return null;
+      try {
+        let fRems =
+          cal && fCal.identifier === cal.identifier
+            ? allReminders
+            : await core.fetchReminders(fCal);
+        let fLatest = fRems
+          .filter(
+            (r) =>
+              !isDataTitle(r.title) &&
+              parseMood(r.title).user.toLowerCase() === c.partner.toLowerCase(),
+          )
+          .sort((a, b) => getTime(b) - getTime(a))[0];
+        if (fLatest) {
+          let fp = parseMood(fLatest.title);
+          let token = faceify(fp.mood).split(" ")[0] || "●";
+          let isRecent =
+            fLatest.creationDate &&
+            Date.now() - new Date(fLatest.creationDate).getTime() <
+              6 * 3600 * 1000;
+          return { partner: c.partner.toLowerCase(), token, isRecent };
+        }
+      } catch (e) {}
+      return null;
+    });
+
+    const results = await Promise.all(circleFetches);
+    for (let res of results) {
+      if (res)
+        friendBarData[res.partner] = {
+          token: res.token,
+          isRecent: res.isRecent,
+        };
+    }
+    cachedFriendBarData = friendBarData;
+    cachedFriendBarTime = now;
   }
 
-  let myHelps = parseHelps(allReminders.find((r) => isHelpsFor(r, myUserName)));
-  let partnerHelps = parseHelps(
-    allReminders.find((r) => isHelpsFor(r, partnerUserName)),
-  );
+  // Optimization 1: Single-pass parse of all reminders
+  let parsedReminders = [];
+  let myHelpsReminder = null;
+  let partnerHelpsReminder = null;
+  let myAvatarReminder = null;
+  let partnerAvatarReminder = null;
+  let loves = [];
 
-  let myAvatarReminder = allReminders.find((r) => isAvatarFor(r, myUserName));
-  let partnerAvatarReminder = allReminders.find((r) =>
-    isAvatarFor(r, partnerUserName),
-  );
+  let myLower = myUserName.toLowerCase();
+  let partnerLower = partnerUserName.toLowerCase();
 
-  let myAvatarB64 = getAvatarBase64FromNotes(myAvatarReminder);
-  let partnerAvatarB64 = getAvatarBase64FromNotes(partnerAvatarReminder);
+  for (let r of allReminders) {
+    let title = r.title || "";
+    if (isAvatarFor(r, myUserName)) {
+      if (!myAvatarReminder) myAvatarReminder = r;
+      continue;
+    }
+    if (isAvatarFor(r, partnerUserName)) {
+      if (!partnerAvatarReminder) partnerAvatarReminder = r;
+      continue;
+    }
+    if (isHelpsFor(r, myUserName)) {
+      if (!myHelpsReminder) myHelpsReminder = r;
+      continue;
+    }
+    if (isHelpsFor(r, partnerUserName)) {
+      if (!partnerHelpsReminder) partnerHelpsReminder = r;
+      continue;
+    }
+    if (core.isLoveTitle(title)) {
+      let l = parseLove(r);
+      if (l) loves.push(l);
+      continue;
+    }
+    if (isDataTitle(title)) continue;
+
+    let p = parseMood(title);
+    let ns = splitNotes(r.notes);
+    let resting = isRestingMood(p.mood);
+    let energy = resting
+      ? null
+      : ns.cap.energy != null
+        ? ns.cap.energy
+        : energyFor(p.mood);
+
+    parsedReminders.push({
+      r: r,
+      title: title,
+      user: p.user,
+      userLower: p.user.toLowerCase(),
+      mood: p.mood,
+      notes: r.notes || "",
+      parsedNotes: ns,
+      creationDate: r.creationDate,
+      time: getTime(r),
+      identifier: r.identifier || "",
+      resting: resting,
+      energy: energy,
+    });
+  }
+
+  let myHelps = parseHelps(myHelpsReminder);
+  let partnerHelps = parseHelps(partnerHelpsReminder);
+
+  let myAvatarB64 = avatarDataUri(myAvatarReminder);
+  let partnerAvatarB64 = avatarDataUri(partnerAvatarReminder);
 
   let myAvatarHtml = myAvatarB64
     ? '<div class="avatar-wrapper"><a href="http://localhost/changeAvatar"><img src="' +
@@ -1522,20 +1150,14 @@ async function buildHtml(state) {
       esc(partnerUserName.charAt(0)) +
       "</div></div>";
 
-  let reminders = allReminders.filter((r) => !isDataTitle(r.title));
-  reminders.sort((a, b) => getTime(b) - getTime(a));
-
+  // Identify latest check-ins from pre-parsed items
   let myLatest = null;
   let partnerLatest = null;
-  for (let r of reminders) {
-    let p = parseMood(r.title);
-    if (!myLatest && p.user.toLowerCase() === myUserName.toLowerCase()) {
-      myLatest = { r: r, mood: p.mood };
-    } else if (
-      !partnerLatest &&
-      p.user.toLowerCase() === partnerUserName.toLowerCase()
-    ) {
-      partnerLatest = { r: r, mood: p.mood };
+  for (let item of parsedReminders) {
+    if (!myLatest && item.userLower === myLower) {
+      myLatest = item;
+    } else if (!partnerLatest && item.userLower === partnerLower) {
+      partnerLatest = item;
     }
     if (myLatest && partnerLatest) break;
   }
@@ -1543,26 +1165,23 @@ async function buildHtml(state) {
   myLatestReminderRef = myLatest ? myLatest.r : null;
 
   let myMood = myLatest ? myLatest.mood : "No Status";
-  let mySplit = splitNotes(myLatest ? myLatest.r.notes : "");
-  let myResting = myLatest ? isRestingMood(myLatest.mood) : false;
+  let mySplit = myLatest ? myLatest.parsedNotes : splitNotes("");
+  let myResting = myLatest ? myLatest.resting : false;
   let myNote =
     mySplit.text || (myResting ? "No check-ins needed" : "Tap 'Log Mood'");
-  let myTime = myLatest ? relTime(myLatest.r.creationDate) : "--";
+  let myTime = myLatest ? relTime(myLatest.creationDate) : "--";
   let myStale = false;
+
   let partnerMood = partnerLatest ? partnerLatest.mood : "No Status";
-  let partnerSplit = splitNotes(partnerLatest ? partnerLatest.r.notes : "");
-  let partnerResting = partnerLatest
-    ? isRestingMood(partnerLatest.mood)
-    : false;
+  let partnerSplit = partnerLatest ? partnerLatest.parsedNotes : splitNotes("");
+  let partnerResting = partnerLatest ? partnerLatest.resting : false;
   let partnerNote =
     partnerSplit.text ||
     (partnerResting ? "No check-ins needed" : "No check-in yet");
-  let partnerTime = partnerLatest
-    ? relTime(partnerLatest.r.creationDate)
-    : "--";
+  let partnerTime = partnerLatest ? relTime(partnerLatest.creationDate) : "--";
   let partnerStale =
     partnerLatest && !partnerResting
-      ? isStale(partnerLatest.r.creationDate)
+      ? isStale(partnerLatest.creationDate)
       : false;
 
   let partnerKey = String(partnerLatest ? partnerLatest.mood : "")
@@ -1574,39 +1193,37 @@ async function buildHtml(state) {
 
   entriesState = {};
   let entryCount = 0;
-  for (let r of reminders) {
-    let ep = parseMood(r.title);
-    if (ep.user.toLowerCase() !== myUserName.toLowerCase() || !r.identifier)
-      continue;
-    let ens = splitNotes(r.notes);
-    let ekey = String(ep.mood).trim().toLowerCase();
-    entriesState[r.identifier] = {
-      mood: faceify(ep.mood),
-      note: ens.text,
-      nr: ens.noReply,
-      need: ens.need || "",
+  for (let item of parsedReminders) {
+    if (item.userLower !== myLower || !item.identifier) continue;
+    let ekey = String(item.mood).trim().toLowerCase();
+    entriesState[item.identifier] = {
+      mood: faceify(item.mood),
+      note: item.parsedNotes.text,
+      nr: item.parsedNotes.noReply,
+      need: item.parsedNotes.need || "",
       cap: [
-        ens.cap.social || 0,
-        ens.cap.sensory || 0,
-        ["ok", "text", "none"].indexOf(ens.cap.talk) + 1,
+        item.parsedNotes.cap.social || 0,
+        item.parsedNotes.cap.sensory || 0,
+        ["ok", "text", "none"].indexOf(item.parsedNotes.cap.talk) + 1,
       ],
-      time: relTime(r.creationDate),
-      editedTime: ens.editedDate ? relTime(ens.editedDate) : "",
-      idx: isRestingMood(ep.mood)
+      time: relTime(item.creationDate),
+      editedTime: item.parsedNotes.editedDate
+        ? relTime(item.parsedNotes.editedDate)
+        : "",
+      idx: item.resting
         ? -2
         : moods.findIndex((m) => String(m.title).trim().toLowerCase() === ekey),
     };
     if (++entryCount >= 150) break;
   }
 
-  let loves = allReminders.map(parseLove).filter(Boolean);
-  let hiddenLove = loadHiddenLove();
+  let hiddenLove = await core.loadHiddenLove();
   let nowMs = Date.now();
   let lovesIn = loves
     .filter(
       (l) =>
-        l.from.toLowerCase() === partnerUserName.toLowerCase() &&
-        l.to.toLowerCase() === myUserName.toLowerCase() &&
+        l.from.toLowerCase() === partnerLower &&
+        l.to.toLowerCase() === myLower &&
         LOVE_KINDS[l.kind] &&
         nowMs - l.t < 2 * DAY_MS &&
         (!l.id || hiddenLove.indexOf(l.id) === -1),
@@ -1615,29 +1232,52 @@ async function buildHtml(state) {
     .slice(0, 2);
   loveState = {
     sent: loves.filter(
-      (l) =>
-        l.from.toLowerCase() === myUserName.toLowerCase() &&
-        nowMs - l.t < DAY_MS,
+      (l) => l.from.toLowerCase() === myLower && nowMs - l.t < DAY_MS,
     ).length,
     max: LOVE_MAX_PER_DAY,
     to: partnerUserName,
   };
 
-  let meEntries = collectEntries(reminders, myUserName);
-  let partnerEntries = collectEntries(reminders, partnerUserName);
-  trendState = {
-    names: [myUserName, partnerUserName],
-    me: {
-      14: summarizeTrend(meEntries, 14),
-      28: summarizeTrend(meEntries, 28),
-    },
-    partner: {
-      14: summarizeTrend(partnerEntries, 14),
-      28: summarizeTrend(partnerEntries, 28),
-    },
-  };
-  let myAlert = myResting ? null : trendState.me["14"].alert;
-  let partnerAlert = partnerResting ? null : trendState.partner["14"].alert;
+  // Optimization 4: Memoized/lazy trend computation against pre-parsed entries
+  let trendKey =
+    (cal ? cal.identifier : listName) +
+    ":" +
+    (myLatest ? myLatest.time : 0) +
+    ":" +
+    (partnerLatest ? partnerLatest.time : 0) +
+    ":" +
+    parsedReminders.length;
+
+  if (cachedTrendState && cachedTrendKey === trendKey) {
+    trendState = cachedTrendState;
+  } else {
+    let meEntries = collectParsedEntries(parsedReminders, myLower);
+    let partnerEntries = collectParsedEntries(parsedReminders, partnerLower);
+    trendState = {
+      names: [myUserName, partnerUserName],
+      me: {
+        14: summarizeTrend(meEntries, 14),
+        28: summarizeTrend(meEntries, 28),
+      },
+      partner: {
+        14: summarizeTrend(partnerEntries, 14),
+        28: summarizeTrend(partnerEntries, 28),
+      },
+    };
+    cachedTrendState = trendState;
+    cachedTrendKey = trendKey;
+  }
+
+  let myAlert = myResting
+    ? null
+    : trendState.me["14"]
+      ? trendState.me["14"].alert
+      : null;
+  let partnerAlert = partnerResting
+    ? null
+    : trendState.partner["14"]
+      ? trendState.partner["14"].alert
+      : null;
   helpsState = {
     mine: myHelps,
     partner: partnerHelps,
@@ -1647,8 +1287,8 @@ async function buildHtml(state) {
 
   let years = [];
   let grouped = {};
-  for (let r of reminders) {
-    let date = r.creationDate ? new Date(r.creationDate) : new Date();
+  for (let item of parsedReminders) {
+    let date = item.creationDate ? new Date(item.creationDate) : new Date();
     let y = date.getFullYear();
     let mo = MONTHS[date.getMonth()];
     if (!grouped[y]) {
@@ -1659,7 +1299,7 @@ async function buildHtml(state) {
       grouped[y].data[mo] = [];
       grouped[y].order.push(mo);
     }
-    grouped[y].data[mo].push(r);
+    grouped[y].data[mo].push(item);
   }
 
   let historyHtml = "";
@@ -1696,40 +1336,42 @@ async function buildHtml(state) {
         '" class="month-container" style="display:' +
         (open ? "block" : "none") +
         ';">';
-      for (let r of list) {
-        let p = parseMood(r.title);
-        let hs = splitNotes(r.notes);
-        let isMine =
-          p.user.toLowerCase() === myUserName.toLowerCase() && !!r.identifier;
-        let cls =
-          p.user.toLowerCase() === myUserName.toLowerCase()
-            ? "tag-me"
-            : "tag-partner";
+      for (let item of list) {
+        let isMine = item.userLower === myLower && !!item.identifier;
+        let cls = isMine ? "tag-me" : "tag-partner";
         historyHtml +=
           '<div class="card' +
           (isMine ? " mine" : "") +
           '"' +
           (isMine
             ? ' data-id="' +
-              esc(r.identifier) +
+              esc(item.identifier) +
               '" onclick="openEdit(this.getAttribute(\'data-id\'))"'
             : "") +
           '><div><div class="user-tag ' +
           cls +
           '">' +
-          esc(p.user) +
+          esc(item.user) +
           "</div>" +
           '<div class="title">' +
-          esc(faceify(p.mood)) +
+          esc(faceify(item.mood)) +
           "</div>" +
-          (hs.text ? '<div class="note">' + esc(hs.text) + "</div>" : "") +
-          needPillHtml(hs.need) +
-          (hs.noReply ? '<div class="nr-pill">🔕 No reply needed</div>' : "") +
-          capChipsHtml(hs.cap) +
+          (item.parsedNotes.text
+            ? '<div class="note">' + esc(item.parsedNotes.text) + "</div>"
+            : "") +
+          needPillHtml(item.parsedNotes.need) +
+          (item.parsedNotes.noReply
+            ? '<div class="nr-pill">🔕 No reply needed</div>'
+            : "") +
+          capChipsHtml(item.parsedNotes.cap) +
           '</div><div class="time">' +
-          (hs.editedDate ? '<div style="font-size:10px;opacity:0.7">✏️ ' + esc(relTime(hs.editedDate)) + '</div>' : '') +
-          energyDotsHtml(p.mood, hs.cap.energy) +
-          esc(formatDate(r.creationDate)) +
+          (item.parsedNotes.editedDate
+            ? '<div style="font-size:10px;opacity:0.7">✏️ ' +
+              esc(relTime(item.parsedNotes.editedDate)) +
+              "</div>"
+            : "") +
+          energyDotsHtml(item.mood, item.energy) +
+          esc(formatDate(item.creationDate)) +
           "</div></div>";
       }
       historyHtml += "</div>";
@@ -1783,8 +1425,6 @@ async function buildHtml(state) {
     ".grabber{width:40px;height:5px;border-radius:3px;background:rgba(255,255,255,0.25);margin:0 auto 14px}",
     ".sheet-title{font-size:20px;font-weight:800;margin:0}",
     ".sheet-sub{font-size:13px;color:rgba(255,255,255,0.55);margin:2px 0 14px}",
-
-    /* Grid & Chips Layout */
     `.mood-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px}`,
     `.chip{appearance:none;-webkit-appearance:none;font:inherit;color:${activeTheme.text};text-align:left;background:${activeTheme.cardSec};border:1.5px solid ${activeTheme.border};border-radius:16px;padding:12px;display:flex;flex-direction:column;gap:5px;min-width:0;box-sizing:border-box;cursor:pointer;transition:transform 0.15s,border-color 0.15s,background 0.15s}`,
     `.chip:active{transform:scale(0.97)}`,
@@ -1793,18 +1433,13 @@ async function buildHtml(state) {
     `.chip-emoji.ini{width:30px;height:30px;border-radius:50%;background:${activeTheme.border};color:${activeTheme.accentMe};font-size:14px;font-weight:800;display:flex;align-items:center;justify-content:center}`,
     `.chip-label{font-size:14px;font-weight:700;color:${activeTheme.text};display:block;overflow-wrap:anywhere}`,
     `.cdots{color:${activeTheme.dots};font-size:11px;letter-spacing:1.5px;display:block}`,
-
-    /* Full-width Resting Chip */
     `.rest-chip{grid-column:1 / -1;display:flex;flex-direction:row;align-items:center;gap:12px;padding:12px 14px}`,
     `.rest-chip .chip-emoji{font-size:24px;flex-shrink:0}`,
     `.rest-chip .chip-label{font-size:15px;flex-shrink:0}`,
     `.rest-sub{margin-left:auto;text-align:right;font-size:11px;color:${activeTheme.textSub};line-height:1.3}`,
-
-    /* Need Chips */
     `.need-chips{display:flex;flex-wrap:wrap;gap:6px;margin:8px 0 12px 0}`,
     `.nchip{appearance:none;-webkit-appearance:none;font:inherit;font-size:12px;font-weight:600;padding:7px 12px;border-radius:999px;border:1px solid ${activeTheme.border};background:${activeTheme.cardSec};color:${activeTheme.textDim};cursor:pointer}`,
     `.nchip.sel{background:${activeTheme.card};border-color:${activeTheme.accentPartner};color:${activeTheme.text};box-shadow:0 0 0 2px ${activeTheme.border}}`,
-
     ".note-input{box-sizing:border-box;width:100%;margin-top:12px;background:rgba(255,255,255,0.07);border:1px solid rgba(255,255,255,0.12);border-radius:14px;padding:14px;color:#fff;font-size:16px;font-family:inherit;outline:none}",
     ".note-input:focus{border-color:#6366f1}",
     ".note-input::placeholder{color:rgba(255,255,255,0.4)}",
@@ -1950,7 +1585,13 @@ async function buildHtml(state) {
     circles
       .map((c, i) => {
         let st = friendBarData[c.partner.toLowerCase()];
-        let badge = st ? (st.isRecent ? '<span style="color:' + activeTheme.dots + '">● </span>' : '') + st.token + ' ' : '';
+        let badge = st
+          ? (st.isRecent
+              ? '<span style="color:' + activeTheme.dots + '">● </span>'
+              : "") +
+            st.token +
+            " "
+          : "";
         return (
           '<a class="fchip' +
           (i === activeCircle ? " active" : "") +
@@ -1989,7 +1630,11 @@ async function buildHtml(state) {
     capChipsHtml(mySplit.cap) +
     '<div class="time" style="text-align:left">' +
     esc(myTime) +
-    (mySplit.editedDate ? ' · <span style="opacity:0.75">✏️ edited ' + esc(relTime(mySplit.editedDate)) + '</span>' : '') +
+    (mySplit.editedDate
+      ? ' · <span style="opacity:0.75">✏️ edited ' +
+        esc(relTime(mySplit.editedDate)) +
+        "</span>"
+      : "") +
     "</div>" +
     "</div></div>" +
     // PARTNER CARD
@@ -2021,7 +1666,11 @@ async function buildHtml(state) {
     '<div class="love-pill" onclick="openLove()">💌 Send love</div>' +
     '<div class="time" style="text-align:left">' +
     esc(partnerTime) +
-    (partnerSplit.editedDate ? ' · <span style="opacity:0.75">✏️ edited ' + esc(relTime(partnerSplit.editedDate)) + '</span>' : '') +
+    (partnerSplit.editedDate
+      ? ' · <span style="opacity:0.75">✏️ edited ' +
+        esc(relTime(partnerSplit.editedDate)) +
+        "</span>"
+      : "") +
     "</div>" +
     "</div>" +
     "</div>" +
@@ -2088,7 +1737,7 @@ async function buildHtml(state) {
     '<button type="button" class="nchip" id="need_0_distract" onclick="setNeed(0,\'distract\')">💬 Distraction</button>' +
     '<button type="button" class="nchip" id="need_0_comfort" onclick="setNeed(0,\'comfort\')">🫂 Comfort</button>' +
     '<button type="button" class="nchip" id="need_0_advice" onclick="setNeed(0,\'advice\')">💡 Advice</button>' +
-    '</div>' +
+    "</div>" +
     '<input id="noteInput" class="note-input" type="text" maxlength="140" placeholder="Add a note (optional)" autocomplete="off" autocapitalize="sentences">' +
     '<div class="nr-row"><button type="button" id="nrBtn0" class="switch" onclick="toggleNr(0)">🔕 No reply needed</button> <button type="button" id="capBtn0" class="switch" onclick="toggleCap(0)">📊 Capacity</button></div>' +
     '<div id="capHost0" class="capbox" style="display:none"></div>' +
@@ -2110,7 +1759,7 @@ async function buildHtml(state) {
     '<button type="button" class="nchip" id="need_1_distract" onclick="setNeed(1,\'distract\')">💬 Distraction</button>' +
     '<button type="button" class="nchip" id="need_1_comfort" onclick="setNeed(1,\'comfort\')">🫂 Comfort</button>' +
     '<button type="button" class="nchip" id="need_1_advice" onclick="setNeed(1,\'advice\')">💡 Advice</button>' +
-    '</div>' +
+    "</div>" +
     '<input id="editNote" class="note-input" type="text" maxlength="140" placeholder="Add a note (optional)" autocomplete="off" autocapitalize="sentences">' +
     '<div class="nr-row"><button type="button" id="nrBtn1" class="switch" onclick="toggleNr(1)">🔕 No reply needed</button> <button type="button" id="capBtn1" class="switch" onclick="toggleCap(1)">📊 Capacity</button></div>' +
     '<div id="capHost1" class="capbox" style="display:none"></div>' +
@@ -2134,7 +1783,7 @@ async function buildHtml(state) {
     '<button type="button" class="ghost-link" onclick="testRemind()">🔔 Send a test (arrives in 10 sec, so leave the app)</button>' +
     '<div class="sheet-actions">' +
     '<button type="button" class="sbtn" onclick="closeSheet()">Cancel</button>' +
-    '<button type="button" class="sbtn sbtn-primary" onclick="saveRemind()">Save</button>' +
+    '<button type="button" id="sbtn sbtn-primary" class="sbtn sbtn-primary" onclick="saveRemind()">Save</button>' +
     "</div></div>" +
     // --- Friends ---
     '<div id="friendsSheet" class="sheet">' +
@@ -2257,7 +1906,11 @@ async function saveMoodFromUrl(url) {
 
   let targets = q.to ? parseTargets(q.to) : [activeCircle];
   if (!targets.length) targets = [activeCircle];
-  await writeCheckins(targets, title, buildNotes(q.note, q.nr === "1", cap, q.need || null));
+  await writeCheckins(
+    targets,
+    title,
+    buildNotes(q.note, q.nr === "1", cap, q.need || null),
+  );
 }
 
 async function saveSameFromUrl(url) {
@@ -2271,12 +1924,16 @@ async function saveSameFromUrl(url) {
   let cap = Object.assign({}, ns.cap);
   let energy = energyOfTitle(mood);
   if (cap.energy == null && energy != null) cap.energy = energy;
-  await writeCheckins(targets, mood, buildNotes(ns.text, ns.noReply, cap, ns.need || null));
+  await writeCheckins(
+    targets,
+    mood,
+    buildNotes(ns.text, ns.noReply, cap, ns.need || null),
+  );
 }
 
 async function findMyEntry(id) {
   if (!id) return myLatestReminderRef;
-  let all = await Reminder.all([cal]);
+  let all = await core.fetchReminders(cal);
   let r = all.find((x) => x.identifier === id);
   if (!r || isDataTitle(r.title)) return null;
   if (parseMood(r.title || "").user.toLowerCase() !== myUserName.toLowerCase())
@@ -2312,18 +1969,17 @@ async function saveEditFromUrl(url) {
   r.notes = buildNotes(q.note, q.nr === "1", cap, q.need || null, new Date());
   await r.save();
 
-  // Sync the edit to matching check-ins in your other friends' lists
   let rTime = r.creationDate ? new Date(r.creationDate).getTime() : 0;
   for (let k of shareCalendars()) {
     if (cal && k.identifier === cal.identifier) continue;
     try {
-      let others = await Reminder.all([k]);
+      let others = await core.fetchReminders(k);
       let match = others.find((x) => {
         if (isDataTitle(x.title)) return false;
         let p = parseMood(x.title || "");
         if (p.user.toLowerCase() !== myUserName.toLowerCase()) return false;
         let xt = x.creationDate ? new Date(x.creationDate).getTime() : 0;
-        return Math.abs(xt - rTime) < 180000; // created around the same time
+        return Math.abs(xt - rTime) < 180000;
       });
       if (match) {
         match.title = r.title;
@@ -2343,7 +1999,7 @@ async function saveHelpsFromUrl(url) {
     return;
   }
   for (let k of shareCalendars()) {
-    let all = await Reminder.all([k]);
+    let all = await core.fetchReminders(k);
     let existing = all.find((r) => isHelpsFor(r, myUserName));
     if (!cards.length) {
       if (existing) await existing.remove();
@@ -2428,7 +2084,7 @@ function readQuickParams() {
 }
 
 async function performQuickLog(p) {
-  let all = await Reminder.all([cal]);
+  let all = await core.fetchReminders(cal);
   let mine =
     all
       .filter(
@@ -2471,7 +2127,11 @@ async function performQuickLog(p) {
     });
     if (picked.length) targets = picked;
   }
-  let n2 = await writeCheckins(targets, title, buildNotes(text, noReply, cap, need));
+  let n2 = await writeCheckins(
+    targets,
+    title,
+    buildNotes(text, noReply, cap, need),
+  );
   if (!n2) return { ok: false, msg: "No shared list found to log into" };
   return {
     ok: true,
@@ -2518,7 +2178,7 @@ async function scheduleCheckInReminder() {
       return;
     }
     let cals = circles.map((c) => findCalendar(c.list)).filter(Boolean);
-    let all = await Reminder.all(cals.length ? cals : [cal]);
+    let all = await core.fetchReminders(cals.length ? cals : [cal]);
     let latest = 0;
     let latestMood = "";
     for (let r of all) {
@@ -2586,7 +2246,7 @@ async function saveSettingsFromUrl(url) {
     quietStart: qs,
     quietEnd: qe,
   };
-  fm.writeString(settingsPath, JSON.stringify(settings, null, 2));
+  core.saveSettings(settings);
 }
 
 async function notify(title, msg) {
@@ -2748,57 +2408,13 @@ async function saveFriendsFromUrl(url) {
   saveCircles();
 }
 
-const LOVE_PREFIX = "Love: ";
-const DAY_MS = 24 * 60 * 60 * 1000;
-const LOVE_MAX_PER_DAY = 3;
-const LOVE_KINDS = {
-  hug: ["🤗", "Sending you a hug"],
-  tea: ["🍵", "Thinking of you"],
-  candle: ["🕯️", "Here if you want me. No pressure."],
-  moon: ["🌙", "Rest well"],
-  seed: ["🌱", "No need to do anything"],
-};
-const loveHiddenPath = fm.joinPath(
-  fm.documentsDirectory(),
-  "mood_love_hidden.json",
-);
-
-function parseLove(r) {
-  let title = String((r && r.title) || "").trim();
-  if (!title.toLowerCase().startsWith("love:")) return null;
-  try {
-    let o = JSON.parse(r.notes || "{}");
-    return {
-      r: r,
-      id: r.identifier || "",
-      from: title.slice(5).trim(),
-      to: String(o.to || ""),
-      kind: String(o.k || ""),
-      note: String(o.n || "").slice(0, 80),
-      t: getTime(r),
-    };
-  } catch (e) {
-    return null;
-  }
-}
-
-function loadHiddenLove() {
-  try {
-    if (fm.fileExists(loveHiddenPath)) {
-      let a = JSON.parse(fm.readString(loveHiddenPath));
-      if (Array.isArray(a)) return a.map(String);
-    }
-  } catch (e) {}
-  return [];
-}
-
 async function hideLoveFromUrl(url) {
   let q = parseQuery(url || "");
   let id = String(q.id || "");
   if (!id) return;
-  let h = loadHiddenLove();
+  let h = await core.loadHiddenLove();
   if (h.indexOf(id) === -1) h.push(id);
-  fm.writeString(loveHiddenPath, JSON.stringify(h.slice(-200)));
+  core.saveHiddenLove(h);
 }
 
 async function saveLoveFromUrl(url) {
@@ -2809,7 +2425,7 @@ async function saveLoveFromUrl(url) {
     .replace(/\s+/g, " ")
     .trim()
     .slice(0, 80);
-  let all = await Reminder.all([cal]);
+  let all = await core.fetchReminders(cal);
   let now = Date.now();
   let me = myUserName.toLowerCase();
   let mine = all.map(parseLove).filter((l) => l && l.from.toLowerCase() === me);
@@ -2829,7 +2445,7 @@ async function saveLoveFromUrl(url) {
 }
 
 function saveMoodPresets() {
-  fm.writeString(configPath, JSON.stringify(moods, null, 2));
+  core.savePresets(moods);
 }
 
 async function saveCustomFromUrl(url) {
@@ -2982,6 +2598,7 @@ async function runDashboard() {
     }
     if (url.indexOf("localhost/hideLove") !== -1) {
       pending = "hideLove";
+      pendingUrl = url;
       return false;
     }
     if (url.indexOf("localhost/switch") !== -1) {
@@ -3019,6 +2636,25 @@ async function runDashboard() {
       pending = null;
       pendingUrl = null;
       let state = await captureState(wv);
+
+      // Invalidate caches on relevant user operations
+      if (
+        action === "refresh" ||
+        action === "addFriend" ||
+        action === "saveFriends"
+      ) {
+        cachedFriendBarData = null;
+      }
+      if (
+        action === "saveMood" ||
+        action === "saveEdit" ||
+        action === "deleteEntry" ||
+        action === "saveSame" ||
+        action === "refresh"
+      ) {
+        cachedTrendState = null;
+      }
+
       if (action === "toggleTheme") await toggleThemeFromUrl();
       if (action === "saveMood") await saveMoodFromUrl(actionUrl);
       if (action === "saveCustom") await saveCustomFromUrl(actionUrl);

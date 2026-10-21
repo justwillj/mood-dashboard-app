@@ -841,8 +841,10 @@ function sortNewestFirst(list) {
 
 // The one way to read a shared list: incomplete reminders, newest first.
 // (A reminder ticked off in the Reminders app disappears everywhere.)
-async function fetchReminders(cal) {
-  return sortNewestFirst(await Reminder.allIncomplete([cal]));
+// Accepts one calendar or an array of calendars.
+async function fetchReminders(calOrList) {
+  let cals = Array.isArray(calOrList) ? calOrList : [calOrList];
+  return sortNewestFirst(await Reminder.allIncomplete(cals));
 }
 
 // Newest check-in of me and of my friend from a newest-first list.

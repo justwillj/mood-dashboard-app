@@ -1,718 +1,301 @@
 // Variables used by Scriptable.
 // These must be at the very top of the file. Do not edit.
 // icon-color: pink; icon-glyph: smile;
-// Variables used by Scriptable.
-// These must be at the very top of the file. Do not edit.
-// icon-color: pink; icon-glyph: smile;
+
 // ==========================================
-// DUAL MOOD HOME SCREEN WIDGET
+// MOOD HOME SCREEN WIDGET (small / medium / large)
+// Shared logic lives in mood-core.js
+// Widget parameter (optional): a friend's name
 // ==========================================
 
-// Must match the dashboard script's name in Scriptable EXACTLY (case and spaces)
+const core = importModule("mood-core");
+
+// Must match the dashboard script's name in Scriptable EXACTLY
 const dashboardScriptName = "mood-dashboard";
 
-let fm = FileManager.iCloud();
-try {
-  fm.documentsDirectory();
-} catch (e) {
-  fm = FileManager.local();
+// Ask iOS to reload the widget after this many minutes (a hint, not a guarantee)
+const REFRESH_MINUTES = 5;
+
+const AMBER = "#FBBF24";
+const DIM_WHITE = new Color("#FFFFFF", 0.6);
+
+// ---- Data -> one plain view object the layouts read from ----
+async function loadView() {
+  const ctx = await core.loadWidgetContext(args.widgetParameter);
+  const snap = await core.loadSnapshot(ctx);
+
+  const p = core.summarizeCheckin(snap.partner, ctx.presets);
+  const me = core.summarizeCheckin(snap.my, ctx.presets);
+
+  const noteText = p.split.noReply
+    ? "🔕 " + (p.split.text || "No reply needed")
+    : p.split.text || (p.resting ? "No check-ins needed" : "");
+
+  return {
+    theme: ctx.theme,
+    partnerName: ctx.partnerUserName,
+    // partner
+    statusText: p.has ? p.statusText : "No Check-in",
+    dots: p.resting ? "" : core.energyDots(p.energy),
+    noteText: noteText,
+    helpText: snap.partner
+      ? core.pickHelpText(snap.helps, snap.partner.mood)
+      : "",
+    resting: p.resting,
+    stale: snap.partner && !p.resting ? core.isStale(p.date) : false,
+    date: p.date,
+    editedDate: p.split.editedDate,
+    cap: p.split.cap,
+    trend: !p.resting && snap.trend ? snap.trend : null,
+    love: snap.love,
+    // me
+    myStatusText: me.has ? me.statusText : "No Status",
+    myDate: me.date,
+    myEditedDate: me.split.editedDate,
+    // misc
+    ranAt: core.clockTime(new Date()),
+  };
 }
 
-const userConfigPath = fm.joinPath(fm.documentsDirectory(), "user_config.json");
-let cachePath = fm.joinPath(fm.documentsDirectory(), "mood_widget_cache.json");
-
-let myUserName = "You";
-let partnerUserName = "Partner";
-let listName = "Mood Dashboard";
-let currentTheme = "forest";
-
-const THEMES = {
-  forest: {
-    bg: "#121915",
-    card: "#1B241F",
-    cardSec: "#161D19",
-    accentMe: "#8DA399",
-    accentPartner: "#D97757",
-    dots: "#E0A96D",
-    text: "#F4F1EA",
-    textDim: "#A3ADA7",
-    textSub: "#75827A",
-  },
-  sand: {
-    bg: "#181513",
-    card: "#231F1C",
-    cardSec: "#1D1916",
-    accentMe: "#D69F54",
-    accentPartner: "#C26D53",
-    dots: "#E7B068",
-    text: "#F5EDE4",
-    textDim: "#A89F96",
-    textSub: "#7B736B",
-  },
-  midnight: {
-    bg: "#0B0C10",
-    card: "#1E1F29",
-    cardSec: "#171821",
-    accentMe: "#818CF8",
-    accentPartner: "#F472B6",
-    dots: "#00E5FF",
-    text: "#FFFFFF",
-    textDim: "#D1D5DB",
-    textSub: "#9CA3AF",
-  },
-};
-
-if (fm.fileExists(userConfigPath)) {
-  try {
-    let userConfig = JSON.parse(fm.readString(userConfigPath));
-    myUserName = (userConfig.myUserName || "You").trim();
-    partnerUserName = (userConfig.partnerUserName || "Partner").trim();
-    listName = (userConfig.listName || "Mood Dashboard").trim();
-    if (userConfig.theme && THEMES[userConfig.theme]) {
-      currentTheme = userConfig.theme;
-    }
-  } catch (e) {
-    console.log("Could not read user_config.json, using defaults.");
-  }
-}
-
-let activeTheme = THEMES[currentTheme] || THEMES.forest;
-
-// ---- Which friend? A widget parameter (a friend's name) wins, else the friend chosen in the dashboard ----
-const circlesPath = fm.joinPath(fm.documentsDirectory(), "mood_circles.json");
-if (fm.fileExists(circlesPath)) {
-  try {
-    let saved = JSON.parse(fm.readString(circlesPath));
-    let friends = (Array.isArray(saved.circles) ? saved.circles : []).filter(
-      (c) =>
-        c &&
-        typeof c.partner === "string" &&
-        typeof c.list === "string" &&
-        c.partner.trim() &&
-        c.list.trim(),
-    );
-    if (friends.length) {
-      let want = String(args.widgetParameter || "")
-        .trim()
-        .toLowerCase();
-      let idx = Math.max(
-        0,
-        Math.min(friends.length - 1, parseInt(saved.active, 10) || 0),
-      );
-      let pick =
-        (want &&
-          friends.find((c) => c.partner.trim().toLowerCase() === want)) ||
-        friends[idx];
-      partnerUserName = pick.partner.trim();
-      listName = pick.list.trim();
-    }
-  } catch (e) {
-    console.log("Could not read mood_circles.json, using defaults.");
-  }
-}
-
-// One cache per friend so switching friends never shows the wrong person
-cachePath = fm.joinPath(
-  fm.documentsDirectory(),
-  "mood_widget_cache_" +
-    partnerUserName.toLowerCase().replace(/[^a-z0-9]+/g, "_") +
-    ".json",
-);
-const presetsPath = fm.joinPath(fm.documentsDirectory(), "mood_presets.json");
-let moodPresets = [];
-
-if (fm.fileExists(presetsPath)) {
-  try {
-    let rawData = fm.readString(presetsPath);
-    let parsed = JSON.parse(rawData);
-    moodPresets = parsed.map((m) =>
-      typeof m === "string" ? { title: m, energy: 3 } : m,
-    );
-  } catch (e) {
-    console.log("Could not parse mood_presets.json: " + e.message);
-  }
-}
-
-if (moodPresets.length === 0) {
-  moodPresets = [
-    { title: "🟢 Locked In", energy: 5 },
-    { title: "⚡ Focused", energy: 4 },
-    { title: "🟣 Creative", energy: 3 },
-    { title: "🟡 Chill", energy: 2 },
-    { title: "☕ Cozy", energy: 2 },
-    { title: "🔴 Low Battery", energy: 1 },
-  ];
-}
-
-// ---- Conventions stored in the shared Reminders list (must match the dashboard) ----
-const NO_REPLY_MARK = "🔕 No reply needed"; // last line of a check-in's notes
-const DAY_MS = 24 * 60 * 60 * 1000;
-const CAP_MARK = "📊";
-const NEED_MARK = "🤝 Need:";
-const EDIT_MARK = "✏️ Edited:";
-
-// Reminders that store data (avatars, help cards, love notes) rather than a mood check-in
-function isDataTitle(title) {
-  let t = String(title || "")
-    .toLowerCase()
-    .trim();
-  return (
-    t.includes("avatar") || t.startsWith("helps:") || t.startsWith("love:")
-  );
-}
-
-function isRestingMood(mood) {
-  return String(mood || "")
-    .trim()
-    .toLowerCase()
-    .startsWith("🌙 resting");
-}
-
-function parseCapLine(line) {
-  let cap = {};
-  String(line)
-    .replace(CAP_MARK, "")
-    .split("·")
-    .forEach((part) => {
-      let p = part.trim();
-      let m = p.match(/^(Energy|Social|Sensory)\s+([1-5])\/5$/i);
-      if (m) {
-        cap[m[1].toLowerCase()] = parseInt(m[2], 10);
-        return;
-      }
-      let t = p.match(/^Talk:\s*(ok|text|none)$/i);
-      if (t) cap.talk = t[1].toLowerCase();
-    });
-  return cap;
-}
-
-// Splits notes into the visible note, capacity values and the "no reply needed" flag
-function splitNotes(raw) {
-  let keep = [];
-  let noReply = false;
-  let cap = {};
-  let need = null;
-  let editedDate = null;
-
-  String(raw || "")
-    .split("\n")
-    .forEach((line) => {
-      let l = line.trim();
-      if (l === NO_REPLY_MARK) {
-        noReply = true;
-      } else if (l.startsWith(CAP_MARK)) {
-        cap = parseCapLine(l);
-      } else if (l.startsWith(NEED_MARK)) {
-        need = l.replace(NEED_MARK, "").trim().toLowerCase();
-      } else if (l.startsWith(EDIT_MARK)) {
-        let parsed = new Date(l.replace(EDIT_MARK, "").trim());
-        if (!isNaN(parsed.getTime())) editedDate = parsed;
-      } else if (l) {
-        keep.push(l);
-      }
-    });
-
-  return { text: keep.join(" "), noReply, cap, need, editedDate };
+// ---- Small helpers ----
+function newBaseWidget(v) {
+  const w = new ListWidget();
+  w.backgroundColor = new Color(v.theme.bg);
+  w.url =
+    "scriptable:///run/" +
+    encodeURIComponent(dashboardScriptName) +
+    "?friend=" +
+    encodeURIComponent(v.partnerName);
+  return w;
 }
 
 // Tiny capacity summary for tight spaces: "🔋2 🔊4 💬"
 function capCompact(cap) {
-  let parts = [];
+  const parts = [];
   if (cap.social != null) parts.push("🔋" + cap.social);
   if (cap.sensory != null) parts.push("🔊" + cap.sensory);
   if (cap.talk) parts.push({ ok: "🗣️", text: "💬", none: "🔇" }[cap.talk]);
   return parts.join(" ");
 }
 
-function isHelpsTitleFor(title, name) {
-  return (
-    String(title || "")
-      .trim()
-      .toLowerCase() === ("Helps: " + name).trim().toLowerCase()
+function addText(stack, text, font, color, opts) {
+  const t = stack.addText(text);
+  t.font = font;
+  t.textColor = color;
+  if (opts && opts.lines) t.lineLimit = opts.lines;
+  if (opts && opts.scale) t.minimumScaleFactor = opts.scale;
+  return t;
+}
+
+// ---- SMALL ----
+function buildSmall(v) {
+  const th = v.theme;
+  const w = newBaseWidget(v);
+  w.setPadding(12, 12, 12, 12);
+
+  const top = w.addStack();
+  top.layoutHorizontally();
+  top.centerAlignContent();
+  addText(
+    top,
+    v.partnerName.toUpperCase(),
+    Font.boldSystemFont(9),
+    new Color(th.accentPartner),
+    { lines: 1, scale: 0.7 },
   );
-}
+  top.addSpacer();
+  addText(top, v.dots, Font.boldSystemFont(8), new Color(th.dots));
 
-// The partner's "what helps" card for their current mood (falls back to their general card)
-function pickHelpText(raw, mood) {
-  try {
-    let list = JSON.parse(raw);
-    if (!Array.isArray(list)) return "";
-    let key = String(mood || "")
-      .trim()
-      .toLowerCase();
-    let ok = (c) => c && typeof c.m === "string" && typeof c.t === "string";
-    let spec = list.find((c) => ok(c) && c.m.trim().toLowerCase() === key);
-    let gen = list.find((c) => ok(c) && c.m === "*");
-    return String((spec || gen || {}).t || "")
-      .trim()
-      .slice(0, 240);
-  } catch (e) {
-    return "";
-  }
-}
+  w.addSpacer(6);
 
-// Energy (1-5) of a mood from this phone's presets; null when unknown
-function presetEnergy(mood) {
-  let key = String(mood || "")
-    .trim()
-    .toLowerCase();
-  if (!key) return null;
-  let p =
-    moodPresets.find((x) => String(x.title).trim().toLowerCase() === key) ||
-    moodPresets.find((x) => String(x.title).toLowerCase().includes(key));
-  return p && p.energy != null ? p.energy : null;
-}
-
-// "Low lately" check for one person over the last 7 days (same rule as the dashboard)
-function lowEnergyInfo(list, userName) {
-  let today = new Date();
-  today.setHours(0, 0, 0, 0);
-  let days = {};
-  for (let r of list) {
-    if (isDataTitle(r.title) || !r.creationDate) continue;
-    let m = String(r.title || "").match(/^\[(.*?)\]\s*(.*)$/);
-    if (!m || m[1].trim().toLowerCase() !== userName.toLowerCase()) continue;
-    let mood = m[2].trim();
-    if (isRestingMood(mood)) continue;
-    let sp = splitNotes(r.notes);
-    let e = sp.cap.energy != null ? sp.cap.energy : presetEnergy(mood);
-    if (e == null) continue;
-    let d = new Date(r.creationDate);
-    d.setHours(0, 0, 0, 0);
-    let age = Math.round((today - d) / DAY_MS);
-    if (age < 0 || age > 6) continue;
-    (days[age] = days[age] || []).push(e);
-  }
-  let keys = Object.keys(days);
-  let low = keys.filter((k) => {
-    let a = days[k];
-    let avg = a.reduce((x, y) => x + y, 0) / a.length;
-    return Math.round(avg * 10) / 10 <= 2;
-  }).length;
-  return low >= 3 && low >= 0.6 * keys.length ? { low: low } : null;
-}
-
-// Async Love: the newest note from my friend to me in the last 48h (not hidden on this phone)
-const LOVE_EMOJI = {
-  hug: "🤗",
-  tea: "🍵",
-  candle: "🕯️",
-  moon: "🌙",
-  seed: "🌱",
-};
-
-function findLove(list, fromName, toName) {
-  let hidden = [];
-  try {
-    let hp = fm.joinPath(fm.documentsDirectory(), "mood_love_hidden.json");
-    if (fm.fileExists(hp)) hidden = JSON.parse(fm.readString(hp)).map(String);
-  } catch (e) {}
-  let best = null;
-  for (let r of list) {
-    let title = String(r.title || "").trim();
-    if (!title.toLowerCase().startsWith("love:")) continue;
-    if (title.slice(5).trim().toLowerCase() !== fromName.toLowerCase())
-      continue;
-    let t = r.creationDate ? new Date(r.creationDate).getTime() : 0;
-    if (Date.now() - t > 2 * DAY_MS) continue;
-    if (r.identifier && hidden.indexOf(String(r.identifier)) !== -1) continue;
-    try {
-      let o = JSON.parse(r.notes || "{}");
-      if (String(o.to || "").toLowerCase() !== toName.toLowerCase()) continue;
-      if (!LOVE_EMOJI[o.k]) continue;
-      if (!best || t > best.t) best = { k: o.k, emoji: LOVE_EMOJI[o.k], t: t };
-    } catch (e) {}
-  }
-  return best;
-}
-
-function getEnergyIcon(level) {
-  let validLevel = Math.max(1, Math.min(5, level || 3));
-  return "●".repeat(validLevel) + "○".repeat(5 - validLevel);
-}
-
-function replaceCirclesWithFaces(text) {
-  if (!text) return "No Status";
-  return text
-    .replace(/🟢/g, "😤")
-    .replace(/🔴/g, "🪫")
-    .replace(/🟡/g, "😌")
-    .replace(/🟣/g, "🎨")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-// ---- Fetch latest moods (with cache fallback) ----
-let myLatest = null;
-let partnerLatest = null;
-let partnerHelpsRaw = "";
-let partnerTrend = null;
-let partnerLove = null;
-let fetchOk = false;
-
-try {
-  let calendars = await Calendar.forReminders();
-  let moodCalendar = calendars.find(
-    (c) => c.title.toLowerCase() === listName.toLowerCase(),
+  addText(
+    w,
+    v.statusText,
+    Font.boldSystemFont(15),
+    v.stale ? DIM_WHITE : new Color(th.text),
+    { lines: 2, scale: 0.8 },
   );
 
-  if (moodCalendar) {
-    let reminders = await Reminder.allIncomplete([moodCalendar]);
-
-    reminders.sort((a, b) => {
-      let ta = a.creationDate ? new Date(a.creationDate).getTime() : 0;
-      let tb = b.creationDate ? new Date(b.creationDate).getTime() : 0;
-      return tb - ta;
-    });
-
-    let helpsReminder = reminders.find((r) =>
-      isHelpsTitleFor(r.title, partnerUserName),
+  if (v.noteText) {
+    w.addSpacer(3);
+    addText(
+      w,
+      '"' + v.noteText + '"',
+      Font.italicSystemFont(10),
+      new Color(th.textDim),
+      { lines: 2, scale: 0.85 },
     );
-    partnerHelpsRaw = helpsReminder ? helpsReminder.notes || "" : "";
-
-    for (let r of reminders) {
-      let title = r.title || "";
-
-      // Skip data reminders (avatars, help cards, love notes)
-      if (isDataTitle(title)) continue;
-
-      let match = title.match(/^\[(.*?)\]\s*(.*)$/);
-      let user = match ? match[1].trim() : "";
-      let mood = match ? match[2].trim() : title.trim();
-
-      if (!myLatest && user.toLowerCase() === myUserName.toLowerCase()) {
-        myLatest = { mood: mood, note: r.notes || "", date: r.creationDate };
-      } else if (
-        !partnerLatest &&
-        (user.toLowerCase() === partnerUserName.toLowerCase() ||
-          (!match &&
-            title.toLowerCase().includes(partnerUserName.toLowerCase())))
-      ) {
-        partnerLatest = {
-          mood: mood,
-          note: r.notes || "",
-          date: r.creationDate,
-        };
-      }
-
-      if (myLatest && partnerLatest) break;
-    }
-
-    partnerTrend = lowEnergyInfo(reminders, partnerUserName);
-    partnerLove = findLove(reminders, partnerUserName, myUserName);
-
-    if (myLatest || partnerLatest) {
-      fetchOk = true;
-      fm.writeString(
-        cachePath,
-        JSON.stringify({
-          my: myLatest,
-          partner: partnerLatest,
-          helps: partnerHelpsRaw,
-          trend: partnerTrend,
-          love: partnerLove,
-        }),
-      );
-    }
   }
-} catch (e) {
-  console.log("Reminders read failed: " + e.message);
-}
 
-if (!fetchOk && fm.fileExists(cachePath)) {
-  try {
-    let cached = JSON.parse(fm.readString(cachePath));
-    myLatest = cached.my || null;
-    partnerLatest = cached.partner || null;
-    partnerHelpsRaw = cached.helps || "";
-    partnerTrend = cached.trend || null;
-    partnerLove = cached.love || null;
-  } catch (e) {
-    console.log("Could not read cache.");
-  }
-}
+  w.addSpacer();
 
-// ---- Derived display values ----
-let pStatusText = partnerLatest
-  ? replaceCirclesWithFaces(partnerLatest.mood)
-  : "No Check-in";
-let pSplit = splitNotes(partnerLatest ? partnerLatest.note : "");
-let pResting = partnerLatest ? isRestingMood(partnerLatest.mood) : false;
-let pNoteText = pSplit.noReply
-  ? "🔕 " + (pSplit.text || "No reply needed")
-  : pSplit.text || (pResting ? "No check-ins needed" : "");
-let helpText = partnerLatest
-  ? pickHelpText(partnerHelpsRaw, partnerLatest.mood)
-  : "";
+  const you = w.addStack();
+  you.layoutHorizontally();
+  you.centerAlignContent();
+  addText(you, "YOU", Font.boldSystemFont(8), new Color(th.accentMe));
+  you.addSpacer(5);
+  addText(
+    you,
+    v.myStatusText,
+    Font.semiboldSystemFont(10),
+    new Color(th.text),
+    { lines: 1, scale: 0.7 },
+  );
 
-let mySplit = splitNotes(myLatest ? myLatest.note : "");
+  w.addSpacer(3);
 
-function isOld(date) {
-  return !!date && Date.now() - new Date(date).getTime() > DAY_MS;
-}
-let myResting = myLatest ? isRestingMood(myLatest.mood) : false;
-let pStale = partnerLatest && !pResting ? isOld(partnerLatest.date) : false;
-let myStale = false;
-const DIM_WHITE = new Color("#FFFFFF", 0.6);
+  addText(
+    w,
+    (v.resting ? "Resting since " : "Updated ") +
+      core.relTime(v.date, { compact: true }),
+    Font.systemFont(8),
+    v.stale ? new Color(AMBER, 0.9) : new Color(th.textSub),
+    { lines: 1 },
+  );
 
-let pMatchedPreset = partnerLatest
-  ? moodPresets.find((p) =>
-      p.title.toLowerCase().includes(partnerLatest.mood.toLowerCase()),
-    )
-  : null;
-let pEnergyLevel =
-  pSplit.cap.energy != null
-    ? pSplit.cap.energy
-    : pMatchedPreset
-      ? pMatchedPreset.energy
-      : 3;
-let pEnergyDots = pResting ? "" : getEnergyIcon(pEnergyLevel);
-
-let myStatusText = myLatest
-  ? replaceCirclesWithFaces(myLatest.mood)
-  : "No Status";
-
-let ranFormatter = new DateFormatter();
-ranFormatter.dateFormat = "h:mm a";
-let ranAt = ranFormatter.string(new Date());
-
-function formatRelativeTime(date) {
-  if (!date) return "";
-  let diffSec = Math.floor((new Date() - new Date(date)) / 1000);
-  if (diffSec < 60) return "just now";
-  let diffMin = Math.floor(diffSec / 60);
-  if (diffMin < 60) return diffMin + "m ago";
-  let diffHours = Math.floor(diffMin / 60);
-  if (diffHours < 24) return diffHours + "h ago";
-  return Math.floor(diffHours / 24) + "d ago";
-}
-
-function addLiveTime(stack, date, size, hex, prefix, stale) {
-  let label = date ? formatRelativeTime(date) : "--";
-  let t = stack.addText((prefix || "") + label);
-  t.font = Font.systemFont(size);
-  t.textColor = stale ? new Color("#FBBF24", 0.9) : new Color(hex);
-  t.lineLimit = 1;
-}
-
-// ---- Widget builders ----
-function newBaseWidget() {
-  let w = new ListWidget();
-  w.backgroundColor = new Color(activeTheme.bg);
-  w.url =
-    "scriptable:///run/" +
-    encodeURIComponent(dashboardScriptName) +
-    "?friend=" +
-    encodeURIComponent(partnerUserName);
   return w;
 }
 
-// SMALL
-function buildSmallWidget() {
-  let widget = newBaseWidget();
-  widget.setPadding(12, 12, 12, 12);
+// ---- MEDIUM & LARGE ----
+function buildMedium(v, isLarge) {
+  const th = v.theme;
+  const w = newBaseWidget(v);
+  w.setPadding(14, 16, 14, 16);
 
-  let topRow = widget.addStack();
-  topRow.layoutHorizontally();
-  topRow.centerAlignContent();
+  const header = w.addStack();
+  header.layoutHorizontally();
+  addText(
+    header,
+    "MOOD DASHBOARD",
+    Font.boldSystemFont(10),
+    new Color(th.accentMe),
+  );
+  header.addSpacer();
+  addText(
+    header,
+    v.love ? "💌 " + v.love.emoji + " from " + v.partnerName : "↻ " + v.ranAt,
+    Font.systemFont(8),
+    new Color(v.love ? th.accentPartner : th.textSub),
+  );
 
-  let name = topRow.addText(partnerUserName.toUpperCase());
-  name.font = Font.boldSystemFont(9);
-  name.textColor = new Color(activeTheme.accentPartner);
-  name.lineLimit = 1;
-  name.minimumScaleFactor = 0.7;
+  w.addSpacer(8);
 
-  topRow.addSpacer();
+  // -- friend card --
+  const card = w.addStack();
+  card.layoutVertically();
+  card.backgroundColor = new Color(th.card);
+  card.cornerRadius = 14;
+  card.setPadding(10, 12, 10, 12);
 
-  let dots = topRow.addText(pEnergyDots);
-  dots.font = Font.boldSystemFont(8);
-  dots.textColor = new Color(activeTheme.dots);
+  const row1 = card.addStack();
+  row1.layoutHorizontally();
+  row1.centerAlignContent();
+  addText(
+    row1,
+    v.partnerName.toUpperCase(),
+    Font.boldSystemFont(10),
+    new Color(th.accentPartner),
+  );
+  row1.addSpacer();
+  addText(row1, v.dots, Font.boldSystemFont(9), new Color(th.dots));
 
-  widget.addSpacer(6);
+  card.addSpacer(3);
+  addText(
+    card,
+    v.statusText,
+    Font.boldSystemFont(14),
+    v.stale ? DIM_WHITE : new Color(th.text),
+    { lines: 1 },
+  );
 
-  let status = widget.addText(pStatusText);
-  status.font = Font.boldSystemFont(15);
-  status.textColor = pStale ? DIM_WHITE : new Color(activeTheme.text);
-  status.lineLimit = 2;
-  status.minimumScaleFactor = 0.8;
-
-  if (pNoteText) {
-    widget.addSpacer(3);
-    let note = widget.addText(`"${pNoteText}"`);
-    note.font = Font.italicSystemFont(10);
-    note.textColor = new Color(activeTheme.textDim);
-    note.lineLimit = 2;
-    note.minimumScaleFactor = 0.85;
+  if (v.noteText) {
+    card.addSpacer(2);
+    addText(
+      card,
+      '"' + v.noteText + '"',
+      Font.italicSystemFont(10),
+      new Color(th.textDim),
+      { lines: 1 },
+    );
   }
 
-  widget.addSpacer();
+  if (v.helpText && (isLarge || !v.noteText)) {
+    card.addSpacer(2);
+    addText(
+      card,
+      "💡 " + v.helpText,
+      Font.systemFont(9.5),
+      new Color("#FDE68A"),
+      { lines: isLarge ? 4 : 2 },
+    );
+  }
 
-  let youRow = widget.addStack();
-  youRow.layoutHorizontally();
-  youRow.centerAlignContent();
+  card.addSpacer(2);
 
-  let youTag = youRow.addText("YOU");
-  youTag.font = Font.boldSystemFont(8);
-  youTag.textColor = new Color(activeTheme.accentMe);
-
-  youRow.addSpacer(5);
-
-  let youMood = youRow.addText(myStatusText);
-  youMood.font = Font.semiboldSystemFont(10);
-  youMood.textColor = myStale ? DIM_WHITE : new Color(activeTheme.text);
-  youMood.lineLimit = 1;
-  youMood.minimumScaleFactor = 0.7;
-
-  widget.addSpacer(3);
-
-  let timeRow = widget.addStack();
+  const timeRow = card.addStack();
   timeRow.layoutHorizontally();
-  addLiveTime(
+  let timeLabel =
+    (v.resting ? "Resting since " : "Updated ") +
+    core.relTime(v.date, { compact: true });
+  if (v.editedDate) {
+    timeLabel += " · ✏️ " + core.relTime(v.editedDate, { compact: true });
+  }
+  addText(
     timeRow,
-    partnerLatest ? partnerLatest.date : null,
-    8,
-    activeTheme.textSub,
-    pResting ? "Resting since " : "Updated ",
-    pStale,
+    timeLabel,
+    Font.systemFont(8),
+    v.stale ? new Color(AMBER, 0.9) : new Color(th.textSub),
+    { lines: 1 },
   );
 
-  return widget;
-}
-
-// MEDIUM & LARGE
-function buildMediumWidget(isLarge) {
-  let widget = newBaseWidget();
-  widget.setPadding(14, 16, 14, 16);
-
-  let headerStack = widget.addStack();
-  headerStack.layoutHorizontally();
-
-  let headerTitle = headerStack.addText("MOOD DASHBOARD");
-  headerTitle.font = Font.boldSystemFont(10);
-  headerTitle.textColor = new Color(activeTheme.accentMe);
-
-  headerStack.addSpacer();
-
-  let ranLabel = headerStack.addText(
-    partnerLove
-      ? "💌 " + partnerLove.emoji + " from " + partnerUserName
-      : "↻ " + ranAt,
-  );
-  ranLabel.font = Font.systemFont(8);
-  ranLabel.textColor = partnerLove
-    ? new Color(activeTheme.accentPartner)
-    : new Color(activeTheme.textSub);
-
-  widget.addSpacer(8);
-
-  let partnerCard = widget.addStack();
-  partnerCard.layoutVertically();
-  partnerCard.backgroundColor = new Color(activeTheme.card);
-  partnerCard.cornerRadius = 14;
-  partnerCard.setPadding(10, 12, 10, 12);
-
-  let pRow1 = partnerCard.addStack();
-  pRow1.layoutHorizontally();
-  pRow1.centerAlignContent();
-
-  let pNameLabel = pRow1.addText(partnerUserName.toUpperCase());
-  pNameLabel.font = Font.boldSystemFont(10);
-  pNameLabel.textColor = new Color(activeTheme.accentPartner);
-
-  pRow1.addSpacer();
-
-  let pDots = pRow1.addText(pEnergyDots);
-  pDots.font = Font.boldSystemFont(9);
-  pDots.textColor = new Color(activeTheme.dots);
-
-  partnerCard.addSpacer(3);
-
-  let pStatus = partnerCard.addText(pStatusText);
-  pStatus.font = Font.boldSystemFont(14);
-  pStatus.textColor = pStale ? DIM_WHITE : new Color(activeTheme.text);
-  pStatus.lineLimit = 1;
-
-  if (pNoteText) {
-    partnerCard.addSpacer(2);
-    let pNote = partnerCard.addText(`"${pNoteText}"`);
-    pNote.font = Font.italicSystemFont(10);
-    pNote.textColor = new Color(activeTheme.textDim);
-    pNote.lineLimit = 1;
-  }
-
-  if (helpText && (isLarge || !pNoteText)) {
-    partnerCard.addSpacer(2);
-    let pHelp = partnerCard.addText("💡 " + helpText);
-    pHelp.font = Font.systemFont(9.5);
-    pHelp.textColor = new Color("#FDE68A");
-    pHelp.lineLimit = isLarge ? 4 : 2;
-  }
-
-  partnerCard.addSpacer(2);
-
-  let pTimeRow = partnerCard.addStack();
-  pTimeRow.layoutHorizontally();
-  let pTimeLabel = (pResting ? "Resting since " : "Updated ") + (partnerLatest && partnerLatest.date ? formatRelativeTime(partnerLatest.date) : "--");
-  if (pSplit.editedDate) {
-    pTimeLabel += " · ✏️ " + formatRelativeTime(pSplit.editedDate);
-  }
-  let pTimeText = pTimeRow.addText(pTimeLabel);
-  pTimeText.font = Font.systemFont(8);
-  pTimeText.textColor = pStale ? new Color("#FBBF24", 0.9) : new Color(activeTheme.textSub);
-  pTimeText.lineLimit = 1;
-
-  let showTrend = !pResting && !!partnerTrend;
-  let pRight = [
-    capCompact(pSplit.cap),
-    showTrend ? "📉 Low " + partnerTrend.low + " of 7 days" : "",
+  const right = [
+    capCompact(v.cap),
+    v.trend ? "📉 Low " + v.trend.low + " of 7 days" : "",
   ]
     .filter(Boolean)
     .join("  ");
-  if (pRight) {
-    pTimeRow.addSpacer();
-    let pr = pTimeRow.addText(pRight);
-    pr.font = Font.systemFont(8.5);
-    pr.textColor = showTrend ? new Color("#FBBF24", 0.9) : new Color("#9CA3AF");
-    pr.lineLimit = 1;
-    pr.minimumScaleFactor = 0.8;
+  if (right) {
+    timeRow.addSpacer();
+    addText(
+      timeRow,
+      right,
+      Font.systemFont(8.5),
+      new Color(v.trend ? AMBER : "#9CA3AF", v.trend ? 0.9 : 1),
+      { lines: 1, scale: 0.8 },
+    );
   }
 
-  widget.addSpacer(8);
+  w.addSpacer(8);
 
-  let myCard = widget.addStack();
-  myCard.layoutHorizontally();
-  myCard.centerAlignContent();
-  myCard.backgroundColor = new Color(activeTheme.cardSec);
-  myCard.cornerRadius = 10;
-  myCard.setPadding(8, 10, 8, 10);
+  // -- my card --
+  const mine = w.addStack();
+  mine.layoutHorizontally();
+  mine.centerAlignContent();
+  mine.backgroundColor = new Color(th.cardSec);
+  mine.cornerRadius = 10;
+  mine.setPadding(8, 10, 8, 10);
 
-  let myTag = myCard.addText("YOU");
-  myTag.font = Font.boldSystemFont(9);
-  myTag.textColor = new Color(activeTheme.accentMe);
+  addText(mine, "YOU", Font.boldSystemFont(9), new Color(th.accentMe));
+  mine.addSpacer(8);
+  addText(
+    mine,
+    v.myStatusText,
+    Font.semiboldSystemFont(11),
+    new Color(th.text),
+    { lines: 1 },
+  );
+  mine.addSpacer();
 
-  myCard.addSpacer(8);
-
-  let myMood = myCard.addText(myStatusText);
-  myMood.font = Font.semiboldSystemFont(11);
-  myMood.textColor = myStale ? DIM_WHITE : new Color(activeTheme.text);
-  myMood.lineLimit = 1;
-
-  myCard.addSpacer();
-
-  let myTimeRow = myCard.addStack();
-  myTimeRow.layoutHorizontally();
-  let myTimeLabel = (myLatest && myLatest.date ? formatRelativeTime(myLatest.date) : "--");
-  if (mySplit.editedDate) {
-    myTimeLabel += " · ✏️ " + formatRelativeTime(mySplit.editedDate);
+  let myTime = core.relTime(v.myDate, { compact: true });
+  if (v.myEditedDate) {
+    myTime += " · ✏️ " + core.relTime(v.myEditedDate, { compact: true });
   }
-  let myTimeText = myTimeRow.addText(myTimeLabel);
-  myTimeText.font = Font.systemFont(8);
-  myTimeText.textColor = new Color(activeTheme.textSub);
-  myTimeText.lineLimit = 1;
+  addText(mine, myTime, Font.systemFont(8), new Color(th.textSub), {
+    lines: 1,
+  });
 
-  if (isLarge) widget.addSpacer();
-
-  return widget;
+  if (isLarge) w.addSpacer();
+  return w;
 }
 
 // ---- Pick size ----
@@ -722,25 +305,28 @@ let cancelled = false;
 if (config.runsInWidget) {
   family = config.widgetFamily || "medium";
 } else {
-  let sizeAlert = new Alert();
+  const sizeAlert = new Alert();
   sizeAlert.title = "Preview size";
   sizeAlert.addAction("Small");
   sizeAlert.addAction("Medium");
   sizeAlert.addAction("Large");
   sizeAlert.addCancelAction("Cancel");
-  let choice = await sizeAlert.presentSheet();
+  const choice = await sizeAlert.presentSheet();
   if (choice === -1) cancelled = true;
   family = ["small", "medium", "large"][choice] || "medium";
 }
 
 if (!cancelled) {
-  let widget =
+  const view = await loadView();
+  const widget =
     family === "small"
-      ? buildSmallWidget()
-      : buildMediumWidget(family === "large");
+      ? buildSmall(view)
+      : buildMedium(view, family === "large");
 
   if (config.runsInWidget) {
-    widget.refreshAfterDate = new Date(Date.now() + 5 * 60 * 1000);
+    widget.refreshAfterDate = new Date(
+      Date.now() + REFRESH_MINUTES * 60 * 1000,
+    );
     Script.setWidget(widget);
   } else if (family === "small") {
     await widget.presentSmall();
