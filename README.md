@@ -1,7 +1,3 @@
-Here is an updated, comprehensive `README.md` that highlights your new modular architecture, neurodivergent-friendly features, themes, widgets, and the streamlined installer script.
-
----
-
 # Dual Mood Dashboard for iOS 🌿✨
 
 An asynchronous, emotionally safe mood and capacity dashboard built for **[Scriptable](https://scriptable.app)** on iOS. Powered by shared Apple Reminders lists synced over iCloud, it provides a low-friction, zero-demand window into how you and the people you care about are doing.
@@ -12,7 +8,7 @@ Designed with **neurodivergent needs (AuDHD / Autism & ADHD)**, emotional safety
 
 ## 🌟 Philosophy & Core Principles
 
-Many people feel forced to _"put their feelings in a box and kick it off a cliff"_ because bringing up negative emotions often triggers defensive debates, panic, or unwanted "fixing." This app acts as a calm, steady container:
+Many people end up bottling up their emotions or suffering in silence because bringing up difficult feelings often triggers defensive debates, anxiety, or immediate attempts to "fix" them. This app acts as a calm, steady container:
 
 - **Zero-Pressure Asynchronous Presence:** No read receipts, no typing indicators, no active timestamps, and no "nudge" buttons. Silence is respected as valid rest.
 - **Cognitive & Sensory Accessibility:** Standard emotion words can be hard to pin down during shutdown or burnout (Alexithymia). The app emphasizes **energy levels, nervous-system states, sensory load, and social battery**.
