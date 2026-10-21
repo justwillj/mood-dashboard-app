@@ -1,6 +1,9 @@
 // Variables used by Scriptable.
 // These must be at the very top of the file. Do not edit.
 // icon-color: purple; icon-glyph: chart-line;
+// Variables used by Scriptable.
+// These must be at the very top of the file. Do not edit.
+// icon-color: purple; icon-glyph: chart-line;
 
 // ==========================================
 // MOOD DASHBOARD
@@ -55,6 +58,7 @@ let activeTheme = core.getTheme(currentTheme);
 async function toggleThemeFromUrl() {
   currentTheme = core.nextThemeName(currentTheme);
   activeTheme = core.getTheme(currentTheme);
+  // Saved to user_config.json so the widgets pick it up too
   try {
     await core.saveUserConfig({
       myUserName: myUserName,
@@ -177,6 +181,7 @@ function needPillHtml(need) {
   return '<div class="need-pill">' + esc(NEEDS[need].full) + "</div>";
 }
 
+// Energy (1-5) of a mood title from this phone's presets; null for resting/unknown
 function energyOfTitle(title) {
   return core.energyOfTitle(title, moods);
 }
@@ -218,6 +223,7 @@ function capChipsHtml(cap) {
     : "";
 }
 
+// Thin wrapper: the shared logic takes the presets as a parameter
 function energyFor(mood) {
   return core.energyFor(mood, moods);
 }
@@ -233,14 +239,6 @@ let helpsState = { mine: [], partner: [], pKey: "", pMood: "" };
 let trendState = { names: ["", ""], me: {}, partner: {} };
 let entriesState = {};
 let loveState = { sent: 0, max: 3, to: "" };
-
-// Performance optimization caches
-let cachedFriendBarData = null;
-let cachedFriendBarTime = 0;
-const FRIEND_BAR_TTL = 3 * 60 * 1000;
-
-let cachedTrendState = null;
-let cachedTrendKey = "";
 
 function buildMockData() {
   let now = new Date();
@@ -543,8 +541,8 @@ function openLog() {
   $("noteInput").value = "";
   $("logBtn").disabled = true;
   nr[0] = false;
-  needSel[0] = "";
   renderNr();
+  needSel[0] = "";
   renderNeeds(0);
   resetCap(0, [0, 0, 0]);
   renderPick();
@@ -581,8 +579,8 @@ function openEdit(id) {
   editSel = e.idx;
   $("editNote").value = e.note;
   nr[1] = !!e.nr;
-  needSel[1] = e.need || "";
   renderNr();
+  needSel[1] = e.need || "";
   renderNeeds(1);
   resetCap(1, e.cap);
   $("editSub").textContent = "Currently " + e.mood + " · " + e.time + (e.editedTime ? " · ✏️ edited " + e.editedTime : "");
@@ -994,142 +992,79 @@ function submitManage() {
   );
 }
 
-function collectParsedEntries(items, userNameLower) {
-  let out = [];
-  for (let item of items) {
-    if (item.userLower !== userNameLower || !item.creationDate) continue;
-    out.push({
-      t: item.time,
-      energy: item.energy,
-      resting: item.resting,
-      social:
-        item.parsedNotes.cap.social != null
-          ? item.parsedNotes.cap.social
-          : null,
-      sensory:
-        item.parsedNotes.cap.sensory != null
-          ? item.parsedNotes.cap.sensory
-          : null,
-      talk: item.parsedNotes.cap.talk || null,
-    });
+// ---- Friend bar: latest mood of every friend ----
+// Other friends' lists are fetched in PARALLEL and cached for a minute, so a
+// rebuild after saving/editing no longer re-reads every list. The open
+// friend's data always comes fresh from the records. ↻ Refresh clears the cache.
+const FRIEND_BAR_TTL_MS = 60 * 1000;
+let friendBarCache = {};
+
+// `reminders` is newest-first (core.fetchReminders), so the first match is the latest
+function friendLatestFrom(reminders, partner) {
+  const key = partner.toLowerCase();
+  for (const r of reminders) {
+    if (isDataTitle(r.title)) continue;
+    const p = parseMood(r.title);
+    if (p.user.toLowerCase() === key)
+      return { mood: p.mood, date: r.creationDate };
   }
-  return out;
+  return null;
+}
+
+// Starts every needed fetch right away (before the open list is awaited)
+function startFriendBarFetch() {
+  const now = Date.now();
+  return circles.map((c) => {
+    const fCal = findCalendar(c.list);
+    const key = c.list.toLowerCase() + "|" + c.partner.toLowerCase();
+    const isActive = !!(cal && fCal && fCal.identifier === cal.identifier);
+    if (!fCal || isActive) return { c: c, isActive: isActive, promise: null };
+    const hit = friendBarCache[key];
+    if (hit && now - hit.at < FRIEND_BAR_TTL_MS)
+      return { c: c, isActive: false, promise: Promise.resolve(hit.latest) };
+    const promise = core
+      .fetchReminders(fCal)
+      .then((rems) => {
+        const latest = friendLatestFrom(rems, c.partner);
+        friendBarCache[key] = { at: Date.now(), latest: latest };
+        return latest;
+      })
+      .catch(() => (friendBarCache[key] ? friendBarCache[key].latest : undefined));
+    return { c: c, isActive: false, promise: promise };
+  });
 }
 
 async function buildHtml(state) {
+  const friendJobs = startFriendBarFetch();
   let allReminders = await core.fetchReminders(cal);
   if (!allReminders || allReminders.length === 0)
     allReminders = buildMockData();
 
-  // Optimizations 2 & 3: Parallel fetch and cache for friend bar
-  let friendBarData = {};
-  let now = Date.now();
-  if (cachedFriendBarData && now - cachedFriendBarTime < FRIEND_BAR_TTL) {
-    friendBarData = cachedFriendBarData;
-  } else {
-    const circleFetches = circles.map(async (c) => {
-      let fCal = findCalendar(c.list);
-      if (!fCal) return null;
-      try {
-        let fRems =
-          cal && fCal.identifier === cal.identifier
-            ? allReminders
-            : await core.fetchReminders(fCal);
-        let fLatest = fRems
-          .filter(
-            (r) =>
-              !isDataTitle(r.title) &&
-              parseMood(r.title).user.toLowerCase() === c.partner.toLowerCase(),
-          )
-          .sort((a, b) => getTime(b) - getTime(a))[0];
-        if (fLatest) {
-          let fp = parseMood(fLatest.title);
-          let token = faceify(fp.mood).split(" ")[0] || "●";
-          let isRecent =
-            fLatest.creationDate &&
-            Date.now() - new Date(fLatest.creationDate).getTime() <
-              6 * 3600 * 1000;
-          return { partner: c.partner.toLowerCase(), token, isRecent };
-        }
-      } catch (e) {}
-      return null;
-    });
-
-    const results = await Promise.all(circleFetches);
-    for (let res of results) {
-      if (res)
-        friendBarData[res.partner] = {
-          token: res.token,
-          isRecent: res.isRecent,
-        };
-    }
-    cachedFriendBarData = friendBarData;
-    cachedFriendBarTime = now;
-  }
-
-  // Optimization 1: Single-pass parse of all reminders
-  let parsedReminders = [];
-  let myHelpsReminder = null;
-  let partnerHelpsReminder = null;
+  // ONE pass over the list: check-ins are parsed once; data reminders
+  // (helps, avatars, love notes) are picked out in the same loop.
+  const records = [];
+  const loves = [];
+  let myHelpsR = null;
+  let partnerHelpsR = null;
   let myAvatarReminder = null;
   let partnerAvatarReminder = null;
-  let loves = [];
-
-  let myLower = myUserName.toLowerCase();
-  let partnerLower = partnerUserName.toLowerCase();
-
-  for (let r of allReminders) {
-    let title = r.title || "";
-    if (isAvatarFor(r, myUserName)) {
-      if (!myAvatarReminder) myAvatarReminder = r;
-      continue;
-    }
-    if (isAvatarFor(r, partnerUserName)) {
-      if (!partnerAvatarReminder) partnerAvatarReminder = r;
-      continue;
-    }
-    if (isHelpsFor(r, myUserName)) {
-      if (!myHelpsReminder) myHelpsReminder = r;
-      continue;
-    }
-    if (isHelpsFor(r, partnerUserName)) {
-      if (!partnerHelpsReminder) partnerHelpsReminder = r;
-      continue;
-    }
-    if (core.isLoveTitle(title)) {
-      let l = parseLove(r);
+  for (const r of allReminders) {
+    if (isDataTitle(r.title)) {
+      if (!myHelpsR && isHelpsFor(r, myUserName)) myHelpsR = r;
+      if (!partnerHelpsR && isHelpsFor(r, partnerUserName)) partnerHelpsR = r;
+      if (!myAvatarReminder && isAvatarFor(r, myUserName)) myAvatarReminder = r;
+      if (!partnerAvatarReminder && isAvatarFor(r, partnerUserName))
+        partnerAvatarReminder = r;
+      const l = parseLove(r);
       if (l) loves.push(l);
-      continue;
+    } else {
+      records.push(core.parseCheckin(r));
     }
-    if (isDataTitle(title)) continue;
-
-    let p = parseMood(title);
-    let ns = splitNotes(r.notes);
-    let resting = isRestingMood(p.mood);
-    let energy = resting
-      ? null
-      : ns.cap.energy != null
-        ? ns.cap.energy
-        : energyFor(p.mood);
-
-    parsedReminders.push({
-      r: r,
-      title: title,
-      user: p.user,
-      userLower: p.user.toLowerCase(),
-      mood: p.mood,
-      notes: r.notes || "",
-      parsedNotes: ns,
-      creationDate: r.creationDate,
-      time: getTime(r),
-      identifier: r.identifier || "",
-      resting: resting,
-      energy: energy,
-    });
   }
+  records.sort((a, b) => b.t - a.t);
 
-  let myHelps = parseHelps(myHelpsReminder);
-  let partnerHelps = parseHelps(partnerHelpsReminder);
+  let myHelps = parseHelps(myHelpsR);
+  let partnerHelps = parseHelps(partnerHelpsR);
 
   let myAvatarB64 = avatarDataUri(myAvatarReminder);
   let partnerAvatarB64 = avatarDataUri(partnerAvatarReminder);
@@ -1150,14 +1085,36 @@ async function buildHtml(state) {
       esc(partnerUserName.charAt(0)) +
       "</div></div>";
 
-  // Identify latest check-ins from pre-parsed items
+  const meLc = myUserName.toLowerCase();
+  const themLc = partnerUserName.toLowerCase();
+
+  // Friend bar: other friends came from the parallel fetch / cache above,
+  // the open friend is read from the records.
+  let friendBarData = {};
+  for (const job of friendJobs) {
+    let latest;
+    if (job.isActive) {
+      const rec = records.find((x) => x.userLc === job.c.partner.toLowerCase());
+      latest = rec ? { mood: rec.mood, date: rec.r.creationDate } : null;
+    } else if (job.promise) {
+      latest = await job.promise;
+    }
+    if (latest) {
+      let token = faceify(latest.mood).split(" ")[0] || "●";
+      let isRecent =
+        latest.date &&
+        Date.now() - new Date(latest.date).getTime() < 6 * 3600 * 1000;
+      friendBarData[job.c.partner.toLowerCase()] = { token, isRecent };
+    }
+  }
+
   let myLatest = null;
   let partnerLatest = null;
-  for (let item of parsedReminders) {
-    if (!myLatest && item.userLower === myLower) {
-      myLatest = item;
-    } else if (!partnerLatest && item.userLower === partnerLower) {
-      partnerLatest = item;
+  for (let rec of records) {
+    if (!myLatest && rec.userLc === meLc) {
+      myLatest = { r: rec.r, mood: rec.mood, ns: rec.ns };
+    } else if (!partnerLatest && rec.userLc === themLc) {
+      partnerLatest = { r: rec.r, mood: rec.mood, ns: rec.ns };
     }
     if (myLatest && partnerLatest) break;
   }
@@ -1165,23 +1122,26 @@ async function buildHtml(state) {
   myLatestReminderRef = myLatest ? myLatest.r : null;
 
   let myMood = myLatest ? myLatest.mood : "No Status";
-  let mySplit = myLatest ? myLatest.parsedNotes : splitNotes("");
-  let myResting = myLatest ? myLatest.resting : false;
+  let mySplit = myLatest ? myLatest.ns : splitNotes("");
+  let myResting = myLatest ? isRestingMood(myLatest.mood) : false;
   let myNote =
     mySplit.text || (myResting ? "No check-ins needed" : "Tap 'Log Mood'");
-  let myTime = myLatest ? relTime(myLatest.creationDate) : "--";
+  let myTime = myLatest ? relTime(myLatest.r.creationDate) : "--";
   let myStale = false;
-
   let partnerMood = partnerLatest ? partnerLatest.mood : "No Status";
-  let partnerSplit = partnerLatest ? partnerLatest.parsedNotes : splitNotes("");
-  let partnerResting = partnerLatest ? partnerLatest.resting : false;
+  let partnerSplit = partnerLatest ? partnerLatest.ns : splitNotes("");
+  let partnerResting = partnerLatest
+    ? isRestingMood(partnerLatest.mood)
+    : false;
   let partnerNote =
     partnerSplit.text ||
     (partnerResting ? "No check-ins needed" : "No check-in yet");
-  let partnerTime = partnerLatest ? relTime(partnerLatest.creationDate) : "--";
+  let partnerTime = partnerLatest
+    ? relTime(partnerLatest.r.creationDate)
+    : "--";
   let partnerStale =
     partnerLatest && !partnerResting
-      ? isStale(partnerLatest.creationDate)
+      ? isStale(partnerLatest.r.creationDate)
       : false;
 
   let partnerKey = String(partnerLatest ? partnerLatest.mood : "")
@@ -1193,24 +1153,23 @@ async function buildHtml(state) {
 
   entriesState = {};
   let entryCount = 0;
-  for (let item of parsedReminders) {
-    if (item.userLower !== myLower || !item.identifier) continue;
-    let ekey = String(item.mood).trim().toLowerCase();
-    entriesState[item.identifier] = {
-      mood: faceify(item.mood),
-      note: item.parsedNotes.text,
-      nr: item.parsedNotes.noReply,
-      need: item.parsedNotes.need || "",
+  for (const rec of records) {
+    if (rec.userLc !== meLc || !rec.r.identifier) continue;
+    let ens = rec.ns;
+    let ekey = String(rec.mood).trim().toLowerCase();
+    entriesState[rec.r.identifier] = {
+      mood: faceify(rec.mood),
+      note: ens.text,
+      nr: ens.noReply,
+      need: ens.need || "",
       cap: [
-        item.parsedNotes.cap.social || 0,
-        item.parsedNotes.cap.sensory || 0,
-        ["ok", "text", "none"].indexOf(item.parsedNotes.cap.talk) + 1,
+        ens.cap.social || 0,
+        ens.cap.sensory || 0,
+        ["ok", "text", "none"].indexOf(ens.cap.talk) + 1,
       ],
-      time: relTime(item.creationDate),
-      editedTime: item.parsedNotes.editedDate
-        ? relTime(item.parsedNotes.editedDate)
-        : "",
-      idx: item.resting
+      time: relTime(rec.r.creationDate),
+      editedTime: ens.editedDate ? relTime(ens.editedDate) : "",
+      idx: rec.resting
         ? -2
         : moods.findIndex((m) => String(m.title).trim().toLowerCase() === ekey),
     };
@@ -1222,8 +1181,8 @@ async function buildHtml(state) {
   let lovesIn = loves
     .filter(
       (l) =>
-        l.from.toLowerCase() === partnerLower &&
-        l.to.toLowerCase() === myLower &&
+        l.from.toLowerCase() === partnerUserName.toLowerCase() &&
+        l.to.toLowerCase() === myUserName.toLowerCase() &&
         LOVE_KINDS[l.kind] &&
         nowMs - l.t < 2 * DAY_MS &&
         (!l.id || hiddenLove.indexOf(l.id) === -1),
@@ -1232,52 +1191,29 @@ async function buildHtml(state) {
     .slice(0, 2);
   loveState = {
     sent: loves.filter(
-      (l) => l.from.toLowerCase() === myLower && nowMs - l.t < DAY_MS,
+      (l) =>
+        l.from.toLowerCase() === myUserName.toLowerCase() &&
+        nowMs - l.t < DAY_MS,
     ).length,
     max: LOVE_MAX_PER_DAY,
     to: partnerUserName,
   };
 
-  // Optimization 4: Memoized/lazy trend computation against pre-parsed entries
-  let trendKey =
-    (cal ? cal.identifier : listName) +
-    ":" +
-    (myLatest ? myLatest.time : 0) +
-    ":" +
-    (partnerLatest ? partnerLatest.time : 0) +
-    ":" +
-    parsedReminders.length;
-
-  if (cachedTrendState && cachedTrendKey === trendKey) {
-    trendState = cachedTrendState;
-  } else {
-    let meEntries = collectParsedEntries(parsedReminders, myLower);
-    let partnerEntries = collectParsedEntries(parsedReminders, partnerLower);
-    trendState = {
-      names: [myUserName, partnerUserName],
-      me: {
-        14: summarizeTrend(meEntries, 14),
-        28: summarizeTrend(meEntries, 28),
-      },
-      partner: {
-        14: summarizeTrend(partnerEntries, 14),
-        28: summarizeTrend(partnerEntries, 28),
-      },
-    };
-    cachedTrendState = trendState;
-    cachedTrendKey = trendKey;
-  }
-
-  let myAlert = myResting
-    ? null
-    : trendState.me["14"]
-      ? trendState.me["14"].alert
-      : null;
-  let partnerAlert = partnerResting
-    ? null
-    : trendState.partner["14"]
-      ? trendState.partner["14"].alert
-      : null;
+  let meEntries = core.entriesFromRecords(records, myUserName, moods);
+  let partnerEntries = core.entriesFromRecords(records, partnerUserName, moods);
+  trendState = {
+    names: [myUserName, partnerUserName],
+    me: {
+      14: summarizeTrend(meEntries, 14),
+      28: summarizeTrend(meEntries, 28),
+    },
+    partner: {
+      14: summarizeTrend(partnerEntries, 14),
+      28: summarizeTrend(partnerEntries, 28),
+    },
+  };
+  let myAlert = myResting ? null : trendState.me["14"].alert;
+  let partnerAlert = partnerResting ? null : trendState.partner["14"].alert;
   helpsState = {
     mine: myHelps,
     partner: partnerHelps,
@@ -1287,8 +1223,8 @@ async function buildHtml(state) {
 
   let years = [];
   let grouped = {};
-  for (let item of parsedReminders) {
-    let date = item.creationDate ? new Date(item.creationDate) : new Date();
+  for (let rec of records) {
+    let date = rec.r.creationDate ? new Date(rec.r.creationDate) : new Date();
     let y = date.getFullYear();
     let mo = MONTHS[date.getMonth()];
     if (!grouped[y]) {
@@ -1299,7 +1235,7 @@ async function buildHtml(state) {
       grouped[y].data[mo] = [];
       grouped[y].order.push(mo);
     }
-    grouped[y].data[mo].push(item);
+    grouped[y].data[mo].push(rec);
   }
 
   let historyHtml = "";
@@ -1336,42 +1272,41 @@ async function buildHtml(state) {
         '" class="month-container" style="display:' +
         (open ? "block" : "none") +
         ';">';
-      for (let item of list) {
-        let isMine = item.userLower === myLower && !!item.identifier;
-        let cls = isMine ? "tag-me" : "tag-partner";
+      for (let rec of list) {
+        let r = rec.r;
+        let p = rec;
+        let hs = rec.ns;
+        let isMine =
+          p.user.toLowerCase() === myUserName.toLowerCase() && !!r.identifier;
+        let cls =
+          p.user.toLowerCase() === myUserName.toLowerCase()
+            ? "tag-me"
+            : "tag-partner";
         historyHtml +=
           '<div class="card' +
           (isMine ? " mine" : "") +
           '"' +
           (isMine
             ? ' data-id="' +
-              esc(item.identifier) +
+              esc(r.identifier) +
               '" onclick="openEdit(this.getAttribute(\'data-id\'))"'
             : "") +
           '><div><div class="user-tag ' +
           cls +
           '">' +
-          esc(item.user) +
+          esc(p.user) +
           "</div>" +
           '<div class="title">' +
-          esc(faceify(item.mood)) +
+          esc(faceify(p.mood)) +
           "</div>" +
-          (item.parsedNotes.text
-            ? '<div class="note">' + esc(item.parsedNotes.text) + "</div>"
-            : "") +
-          needPillHtml(item.parsedNotes.need) +
-          (item.parsedNotes.noReply
-            ? '<div class="nr-pill">🔕 No reply needed</div>'
-            : "") +
-          capChipsHtml(item.parsedNotes.cap) +
+          (hs.text ? '<div class="note">' + esc(hs.text) + "</div>" : "") +
+          needPillHtml(hs.need) +
+          (hs.noReply ? '<div class="nr-pill">🔕 No reply needed</div>' : "") +
+          capChipsHtml(hs.cap) +
           '</div><div class="time">' +
-          (item.parsedNotes.editedDate
-            ? '<div style="font-size:10px;opacity:0.7">✏️ ' +
-              esc(relTime(item.parsedNotes.editedDate)) +
-              "</div>"
-            : "") +
-          energyDotsHtml(item.mood, item.energy) +
-          esc(formatDate(item.creationDate)) +
+          (hs.editedDate ? '<div style="font-size:10px;opacity:0.7">✏️ ' + esc(relTime(hs.editedDate)) + '</div>' : '') +
+          energyDotsHtml(p.mood, hs.cap.energy) +
+          esc(formatDate(r.creationDate)) +
           "</div></div>";
       }
       historyHtml += "</div>";
@@ -1425,6 +1360,8 @@ async function buildHtml(state) {
     ".grabber{width:40px;height:5px;border-radius:3px;background:rgba(255,255,255,0.25);margin:0 auto 14px}",
     ".sheet-title{font-size:20px;font-weight:800;margin:0}",
     ".sheet-sub{font-size:13px;color:rgba(255,255,255,0.55);margin:2px 0 14px}",
+
+    /* Grid & Chips Layout */
     `.mood-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px}`,
     `.chip{appearance:none;-webkit-appearance:none;font:inherit;color:${activeTheme.text};text-align:left;background:${activeTheme.cardSec};border:1.5px solid ${activeTheme.border};border-radius:16px;padding:12px;display:flex;flex-direction:column;gap:5px;min-width:0;box-sizing:border-box;cursor:pointer;transition:transform 0.15s,border-color 0.15s,background 0.15s}`,
     `.chip:active{transform:scale(0.97)}`,
@@ -1433,13 +1370,18 @@ async function buildHtml(state) {
     `.chip-emoji.ini{width:30px;height:30px;border-radius:50%;background:${activeTheme.border};color:${activeTheme.accentMe};font-size:14px;font-weight:800;display:flex;align-items:center;justify-content:center}`,
     `.chip-label{font-size:14px;font-weight:700;color:${activeTheme.text};display:block;overflow-wrap:anywhere}`,
     `.cdots{color:${activeTheme.dots};font-size:11px;letter-spacing:1.5px;display:block}`,
+
+    /* Full-width Resting Chip */
     `.rest-chip{grid-column:1 / -1;display:flex;flex-direction:row;align-items:center;gap:12px;padding:12px 14px}`,
     `.rest-chip .chip-emoji{font-size:24px;flex-shrink:0}`,
     `.rest-chip .chip-label{font-size:15px;flex-shrink:0}`,
     `.rest-sub{margin-left:auto;text-align:right;font-size:11px;color:${activeTheme.textSub};line-height:1.3}`,
+
+    /* Need Chips */
     `.need-chips{display:flex;flex-wrap:wrap;gap:6px;margin:8px 0 12px 0}`,
     `.nchip{appearance:none;-webkit-appearance:none;font:inherit;font-size:12px;font-weight:600;padding:7px 12px;border-radius:999px;border:1px solid ${activeTheme.border};background:${activeTheme.cardSec};color:${activeTheme.textDim};cursor:pointer}`,
     `.nchip.sel{background:${activeTheme.card};border-color:${activeTheme.accentPartner};color:${activeTheme.text};box-shadow:0 0 0 2px ${activeTheme.border}}`,
+
     ".note-input{box-sizing:border-box;width:100%;margin-top:12px;background:rgba(255,255,255,0.07);border:1px solid rgba(255,255,255,0.12);border-radius:14px;padding:14px;color:#fff;font-size:16px;font-family:inherit;outline:none}",
     ".note-input:focus{border-color:#6366f1}",
     ".note-input::placeholder{color:rgba(255,255,255,0.4)}",
@@ -1585,13 +1527,7 @@ async function buildHtml(state) {
     circles
       .map((c, i) => {
         let st = friendBarData[c.partner.toLowerCase()];
-        let badge = st
-          ? (st.isRecent
-              ? '<span style="color:' + activeTheme.dots + '">● </span>'
-              : "") +
-            st.token +
-            " "
-          : "";
+        let badge = st ? (st.isRecent ? '<span style="color:' + activeTheme.dots + '">● </span>' : '') + st.token + ' ' : '';
         return (
           '<a class="fchip' +
           (i === activeCircle ? " active" : "") +
@@ -1630,11 +1566,7 @@ async function buildHtml(state) {
     capChipsHtml(mySplit.cap) +
     '<div class="time" style="text-align:left">' +
     esc(myTime) +
-    (mySplit.editedDate
-      ? ' · <span style="opacity:0.75">✏️ edited ' +
-        esc(relTime(mySplit.editedDate)) +
-        "</span>"
-      : "") +
+    (mySplit.editedDate ? ' · <span style="opacity:0.75">✏️ edited ' + esc(relTime(mySplit.editedDate)) + '</span>' : '') +
     "</div>" +
     "</div></div>" +
     // PARTNER CARD
@@ -1666,11 +1598,7 @@ async function buildHtml(state) {
     '<div class="love-pill" onclick="openLove()">💌 Send love</div>' +
     '<div class="time" style="text-align:left">' +
     esc(partnerTime) +
-    (partnerSplit.editedDate
-      ? ' · <span style="opacity:0.75">✏️ edited ' +
-        esc(relTime(partnerSplit.editedDate)) +
-        "</span>"
-      : "") +
+    (partnerSplit.editedDate ? ' · <span style="opacity:0.75">✏️ edited ' + esc(relTime(partnerSplit.editedDate)) + '</span>' : '') +
     "</div>" +
     "</div>" +
     "</div>" +
@@ -1737,7 +1665,7 @@ async function buildHtml(state) {
     '<button type="button" class="nchip" id="need_0_distract" onclick="setNeed(0,\'distract\')">💬 Distraction</button>' +
     '<button type="button" class="nchip" id="need_0_comfort" onclick="setNeed(0,\'comfort\')">🫂 Comfort</button>' +
     '<button type="button" class="nchip" id="need_0_advice" onclick="setNeed(0,\'advice\')">💡 Advice</button>' +
-    "</div>" +
+    '</div>' +
     '<input id="noteInput" class="note-input" type="text" maxlength="140" placeholder="Add a note (optional)" autocomplete="off" autocapitalize="sentences">' +
     '<div class="nr-row"><button type="button" id="nrBtn0" class="switch" onclick="toggleNr(0)">🔕 No reply needed</button> <button type="button" id="capBtn0" class="switch" onclick="toggleCap(0)">📊 Capacity</button></div>' +
     '<div id="capHost0" class="capbox" style="display:none"></div>' +
@@ -1759,7 +1687,7 @@ async function buildHtml(state) {
     '<button type="button" class="nchip" id="need_1_distract" onclick="setNeed(1,\'distract\')">💬 Distraction</button>' +
     '<button type="button" class="nchip" id="need_1_comfort" onclick="setNeed(1,\'comfort\')">🫂 Comfort</button>' +
     '<button type="button" class="nchip" id="need_1_advice" onclick="setNeed(1,\'advice\')">💡 Advice</button>' +
-    "</div>" +
+    '</div>' +
     '<input id="editNote" class="note-input" type="text" maxlength="140" placeholder="Add a note (optional)" autocomplete="off" autocapitalize="sentences">' +
     '<div class="nr-row"><button type="button" id="nrBtn1" class="switch" onclick="toggleNr(1)">🔕 No reply needed</button> <button type="button" id="capBtn1" class="switch" onclick="toggleCap(1)">📊 Capacity</button></div>' +
     '<div id="capHost1" class="capbox" style="display:none"></div>' +
@@ -1783,7 +1711,7 @@ async function buildHtml(state) {
     '<button type="button" class="ghost-link" onclick="testRemind()">🔔 Send a test (arrives in 10 sec, so leave the app)</button>' +
     '<div class="sheet-actions">' +
     '<button type="button" class="sbtn" onclick="closeSheet()">Cancel</button>' +
-    '<button type="button" id="sbtn sbtn-primary" class="sbtn sbtn-primary" onclick="saveRemind()">Save</button>' +
+    '<button type="button" class="sbtn sbtn-primary" onclick="saveRemind()">Save</button>' +
     "</div></div>" +
     // --- Friends ---
     '<div id="friendsSheet" class="sheet">' +
@@ -1906,11 +1834,7 @@ async function saveMoodFromUrl(url) {
 
   let targets = q.to ? parseTargets(q.to) : [activeCircle];
   if (!targets.length) targets = [activeCircle];
-  await writeCheckins(
-    targets,
-    title,
-    buildNotes(q.note, q.nr === "1", cap, q.need || null),
-  );
+  await writeCheckins(targets, title, buildNotes(q.note, q.nr === "1", cap, q.need || null));
 }
 
 async function saveSameFromUrl(url) {
@@ -1924,11 +1848,7 @@ async function saveSameFromUrl(url) {
   let cap = Object.assign({}, ns.cap);
   let energy = energyOfTitle(mood);
   if (cap.energy == null && energy != null) cap.energy = energy;
-  await writeCheckins(
-    targets,
-    mood,
-    buildNotes(ns.text, ns.noReply, cap, ns.need || null),
-  );
+  await writeCheckins(targets, mood, buildNotes(ns.text, ns.noReply, cap, ns.need || null));
 }
 
 async function findMyEntry(id) {
@@ -1969,6 +1889,7 @@ async function saveEditFromUrl(url) {
   r.notes = buildNotes(q.note, q.nr === "1", cap, q.need || null, new Date());
   await r.save();
 
+  // Sync the edit to matching check-ins in your other friends' lists
   let rTime = r.creationDate ? new Date(r.creationDate).getTime() : 0;
   for (let k of shareCalendars()) {
     if (cal && k.identifier === cal.identifier) continue;
@@ -1979,7 +1900,7 @@ async function saveEditFromUrl(url) {
         let p = parseMood(x.title || "");
         if (p.user.toLowerCase() !== myUserName.toLowerCase()) return false;
         let xt = x.creationDate ? new Date(x.creationDate).getTime() : 0;
-        return Math.abs(xt - rTime) < 180000;
+        return Math.abs(xt - rTime) < 180000; // created around the same time
       });
       if (match) {
         match.title = r.title;
@@ -2127,11 +2048,7 @@ async function performQuickLog(p) {
     });
     if (picked.length) targets = picked;
   }
-  let n2 = await writeCheckins(
-    targets,
-    title,
-    buildNotes(text, noReply, cap, need),
-  );
+  let n2 = await writeCheckins(targets, title, buildNotes(text, noReply, cap, need));
   if (!n2) return { ok: false, msg: "No shared list found to log into" };
   return {
     ok: true,
@@ -2636,25 +2553,6 @@ async function runDashboard() {
       pending = null;
       pendingUrl = null;
       let state = await captureState(wv);
-
-      // Invalidate caches on relevant user operations
-      if (
-        action === "refresh" ||
-        action === "addFriend" ||
-        action === "saveFriends"
-      ) {
-        cachedFriendBarData = null;
-      }
-      if (
-        action === "saveMood" ||
-        action === "saveEdit" ||
-        action === "deleteEntry" ||
-        action === "saveSame" ||
-        action === "refresh"
-      ) {
-        cachedTrendState = null;
-      }
-
       if (action === "toggleTheme") await toggleThemeFromUrl();
       if (action === "saveMood") await saveMoodFromUrl(actionUrl);
       if (action === "saveCustom") await saveCustomFromUrl(actionUrl);
@@ -2671,6 +2569,7 @@ async function runDashboard() {
       if (action === "switch") await switchCircleFromUrl(actionUrl);
       if (action === "addFriend") await addFriendFromUrl(actionUrl);
       if (action === "saveFriends") await saveFriendsFromUrl(actionUrl);
+      if (action === "refresh") friendBarCache = {};
       await scheduleCheckInReminder();
       if (!closed) {
         await wv.loadHTML(await buildHtml(state), "http://localhost/");

@@ -1,6 +1,9 @@
 // Variables used by Scriptable.
 // These must be at the very top of the file. Do not edit.
 // icon-color: deep-gray; icon-glyph: cog;
+// Variables used by Scriptable.
+// These must be at the very top of the file. Do not edit.
+// icon-color: deep-gray; icon-glyph: cog;
 
 // ==========================================
 // MOOD CORE
@@ -58,18 +61,8 @@ const LOVE_KINDS = {
 };
 
 const MONTHS = [
-  "January",
-  "February",
-  "March",
-  "April",
-  "May",
-  "June",
-  "July",
-  "August",
-  "September",
-  "October",
-  "November",
-  "December",
+  "January", "February", "March", "April", "May", "June",
+  "July", "August", "September", "October", "November", "December",
 ];
 
 const DEFAULT_MOODS = [
@@ -355,9 +348,7 @@ function saveCircles(circles, active) {
 
 // A widget parameter (friend's name) wins, else the friend chosen in the dashboard
 function pickCircle(circles, active, want) {
-  let w = String(want || "")
-    .trim()
-    .toLowerCase();
+  let w = String(want || "").trim().toLowerCase();
   let found = w && circles.find((c) => c.partner.trim().toLowerCase() === w);
   return found || circles[Math.max(0, Math.min(circles.length - 1, active))];
 }
@@ -376,9 +367,7 @@ function saveHiddenLove(ids) {
 function cacheFileFor(partner) {
   return (
     "mood_widget_cache_" +
-    String(partner)
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, "_") +
+    String(partner).toLowerCase().replace(/[^a-z0-9]+/g, "_") +
     ".json"
   );
 }
@@ -404,9 +393,7 @@ const getTime = (r) =>
   r && r.creationDate ? new Date(r.creationDate).getTime() : 0;
 
 function lc(s) {
-  return String(s || "")
-    .trim()
-    .toLowerCase();
+  return String(s || "").trim().toLowerCase();
 }
 
 // "[Name] 🟢 Mood" -> { user, mood }; anything else -> user "Unknown"
@@ -585,9 +572,7 @@ function pickHelpText(raw, mood) {
     let ok = (c) => c && typeof c.m === "string" && typeof c.t === "string";
     let spec = list.find((c) => ok(c) && c.m.trim().toLowerCase() === key);
     let gen = list.find((c) => ok(c) && c.m === "*");
-    return String((spec || gen || {}).t || "")
-      .trim()
-      .slice(0, 240);
+    return String((spec || gen || {}).t || "").trim().slice(0, 240);
   } catch (e) {
     return "";
   }
@@ -730,29 +715,52 @@ function round1(n) {
   return n == null ? null : Math.round(n * 10) / 10;
 }
 
-// One person's check-ins as plain entries (data reminders skipped)
-function collectEntries(list, userName, presets) {
+// Parse one check-in reminder ONCE into a plain record. Everything that needs
+// the title or notes (history, trends, latest, edit sheet) reads this record.
+function parseCheckin(r) {
+  let p = parseMood(r.title || "");
+  return {
+    r: r,
+    user: p.user,
+    userLc: p.user.toLowerCase(),
+    mood: p.mood,
+    ns: splitNotes(r.notes),
+    resting: isRestingMood(p.mood),
+    t: getTime(r),
+  };
+}
+
+// One person's entries for the trend charts, from already-parsed records
+function entriesFromRecords(records, userName, presets) {
   let out = [];
-  for (let r of list) {
-    if (isDataTitle(r.title) || !r.creationDate) continue;
-    let p = parseMood(r.title || "");
-    if (lc(p.user) !== lc(userName)) continue;
-    let ns = splitNotes(r.notes);
-    let resting = isRestingMood(p.mood);
+  for (let rec of records) {
+    if (!rec.r.creationDate || lc(rec.user) !== lc(userName)) continue;
     let energy = null;
-    if (!resting)
+    if (!rec.resting)
       energy =
-        ns.cap.energy != null ? ns.cap.energy : energyFor(p.mood, presets);
+        rec.ns.cap.energy != null
+          ? rec.ns.cap.energy
+          : energyFor(rec.mood, presets);
     out.push({
-      t: new Date(r.creationDate).getTime(),
+      t: new Date(rec.r.creationDate).getTime(),
       energy: energy,
-      resting: resting,
-      social: ns.cap.social != null ? ns.cap.social : null,
-      sensory: ns.cap.sensory != null ? ns.cap.sensory : null,
-      talk: ns.cap.talk || null,
+      resting: rec.resting,
+      social: rec.ns.cap.social != null ? rec.ns.cap.social : null,
+      sensory: rec.ns.cap.sensory != null ? rec.ns.cap.sensory : null,
+      talk: rec.ns.cap.talk || null,
     });
   }
   return out;
+}
+
+// Same as entriesFromRecords, starting from raw reminders (data reminders skipped)
+function collectEntries(list, userName, presets) {
+  let records = [];
+  for (let r of list) {
+    if (isDataTitle(r.title) || !r.creationDate) continue;
+    records.push(parseCheckin(r));
+  }
+  return entriesFromRecords(records, userName, presets);
 }
 
 // R = number of days to chart (14 or 28). `alert` is always about the last 7 days.
@@ -989,94 +997,35 @@ async function loadSnapshot(ctx, opts) {
 // ------------------------------------------
 module.exports = {
   // constants
-  DAY_MS,
-  LOW_ENERGY,
-  LOVE_MAX_PER_DAY,
-  NO_REPLY_MARK,
-  CAP_MARK,
-  NEED_MARK,
-  EDIT_MARK,
-  REST_TITLE,
-  HELPS_PREFIX,
-  LOVE_PREFIX,
-  NEEDS,
-  LOVE_KINDS,
-  MONTHS,
-  FILES,
-  DEFAULT_SETTINGS,
-  defaultMoods,
-  clampInt,
+  DAY_MS, LOW_ENERGY, LOVE_MAX_PER_DAY,
+  NO_REPLY_MARK, CAP_MARK, NEED_MARK, EDIT_MARK,
+  REST_TITLE, HELPS_PREFIX, LOVE_PREFIX,
+  NEEDS, LOVE_KINDS, MONTHS, FILES, DEFAULT_SETTINGS,
+  defaultMoods, clampInt,
   // themes
-  THEMES,
-  THEME_ORDER,
-  getTheme,
-  getWidgetTheme,
-  nextThemeName,
+  THEMES, THEME_ORDER, getTheme, getWidgetTheme, nextThemeName,
   // storage
-  fm,
-  docPath,
-  fileExists,
-  readJson,
-  writeJson,
-  loadUserConfig,
-  saveUserConfig,
-  loadPresets,
-  savePresets,
-  loadSettings,
-  saveSettings,
-  cleanCircle,
-  loadCircles,
-  saveCircles,
-  pickCircle,
-  loadHiddenLove,
-  saveHiddenLove,
-  cacheFileFor,
-  readSnapshotCache,
-  writeSnapshotCache,
+  fm, docPath, fileExists, readJson, writeJson,
+  loadUserConfig, saveUserConfig,
+  loadPresets, savePresets,
+  loadSettings, saveSettings,
+  cleanCircle, loadCircles, saveCircles, pickCircle,
+  loadHiddenLove, saveHiddenLove,
+  cacheFileFor, readSnapshotCache, writeSnapshotCache,
   // protocol
-  getTime,
-  parseMood,
-  isAvatarTitle,
-  isAvatarFor,
-  isHelpsTitle,
-  isHelpsFor,
-  isLoveTitle,
-  isDataTitle,
-  isRestingMood,
-  avatarDataUri,
-  parseCapLine,
-  formatCapLine,
-  splitNotes,
-  buildNotes,
-  capFromQuery,
-  sanitizeHelps,
-  parseHelps,
-  pickHelpText,
-  parseLove,
-  findLove,
+  getTime, parseMood,
+  isAvatarTitle, isAvatarFor, isHelpsTitle, isHelpsFor, isLoveTitle, isDataTitle,
+  isRestingMood, avatarDataUri,
+  parseCapLine, formatCapLine, splitNotes, buildNotes, capFromQuery,
+  sanitizeHelps, parseHelps, pickHelpText,
+  parseLove, findLove,
   // formatting
-  faceify,
-  energyDots,
-  formatDate,
-  clockTime,
-  relTime,
-  isStale,
+  faceify, energyDots, formatDate, clockTime, relTime, isStale,
   // energy + analytics
-  energyFor,
-  energyOfTitle,
-  resolveEnergy,
-  dayKey,
-  avgOf,
-  round1,
-  collectEntries,
-  summarizeTrend,
-  lowEnergyInfo,
+  energyFor, energyOfTitle, resolveEnergy,
+  dayKey, avgOf, round1,
+  parseCheckin, entriesFromRecords, collectEntries, summarizeTrend, lowEnergyInfo,
   // reading + snapshot
-  findCalendar,
-  sortNewestFirst,
-  fetchReminders,
-  latestCheckins,
-  summarizeCheckin,
-  loadWidgetContext,
-  loadSnapshot,
+  findCalendar, sortNewestFirst, fetchReminders, latestCheckins,
+  summarizeCheckin, loadWidgetContext, loadSnapshot,
 };
