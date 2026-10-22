@@ -10,13 +10,13 @@ struct DashboardView: View {
         
         ScrollView {
             VStack(spacing: 16) {
-                // Top Friend Bar / Theme Switcher
+                // Top Friend Bar & Theme Switcher
                 FriendBar()
                 
                 // User's Hero Card
                 HeroCard(title: "You", status: vm.mine)
                 
-                // Friend Hero Cards (Restores the Friend Cards!)
+                // Friend Hero Card
                 if let friend = vm.selectedFriend {
                     HeroCard(title: friend.name, status: vm.partnerStatus)
                 }
@@ -27,10 +27,12 @@ struct DashboardView: View {
         .preferredColorScheme(.dark)
         .animation(.snappy, value: vm.theme.id)
         
-        // Bottom Action Bar for Logging
+        // Bottom Log Mood Action Bar
         .safeAreaInset(edge: .bottom) {
             HStack(spacing: 10) {
-                Button { showLog = true } label: {
+                Button { 
+                    showLog = true 
+                } label: {
                     Label("Log mood", systemImage: "plus")
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 12)
@@ -39,7 +41,9 @@ struct DashboardView: View {
                 }
                 
                 if vm.mine != nil {
-                    Button { Task { await vm.logSameAsLast() } } label: {
+                    Button { 
+                        Task { await vm.logSameAsLast() } 
+                    } label: {
                         Image(systemName: "arrow.counterclockwise")
                             .padding(13)
                             .background(Color(t.card), in: Circle())
