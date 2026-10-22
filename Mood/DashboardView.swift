@@ -3,11 +3,10 @@ import MoodCore
 
 struct DashboardView: View {
     @Environment(DashboardViewModel.self) private var vm
-    @State private var showLog = false          // controls the LogMoodSheet
+    @State private var showLog = false
 
     var body: some View {
         let t = vm.theme
-        
         ScrollView {
             VStack(spacing: 16) {
                 FriendBar()
@@ -16,13 +15,11 @@ struct DashboardView: View {
                     Text(msg).font(.footnote).foregroundStyle(Color(t.accentPartner))
                 }
 
-                // Your Hero Card (using Claude's original parameters)
                 HeroCard(heading: "You",
                          checkIn: vm.mine, presets: vm.presets, theme: t,
                          accent: t.accentMe, fill: t.heroMe, stroke: t.border,
                          alert: vm.myAlert)
 
-                // Friend's Hero Card (using Claude's original parameters)
                 HeroCard(heading: vm.selectedFriend?.name ?? "Friend",
                          checkIn: vm.theirs, presets: vm.presets, theme: t,
                          accent: t.accentPartner, fill: t.heroPartner, stroke: t.borderPartner,
@@ -33,8 +30,6 @@ struct DashboardView: View {
         .background(Color(t.bg).ignoresSafeArea())
         .preferredColorScheme(.dark)
         .animation(.snappy, value: vm.theme.id)
-        
-        // Bottom Action Bar to open LogMoodSheet
         .safeAreaInset(edge: .bottom) {
             HStack(spacing: 10) {
                 Button { showLog = true } label: {
