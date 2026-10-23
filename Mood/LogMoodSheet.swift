@@ -7,16 +7,33 @@ struct LogMoodSheet: View {
 
     private static let restingID = "resting"
 
+    /// nil = new check-in; non-nil = editing this one.
+    private let editing: CheckIn?
+
     @State private var pick: String?            // preset.id or restingID
-    @State private var note = ""
-    @State private var noReply = false
+    @State private var note: String
+    @State private var noReply: Bool
     @State private var need: Need?
     @State private var social: Int?
     @State private var sensory: Int?
     @State private var talk: TalkPreference?
-    @State private var shareWith: Set<UserID> = []
+    @State private var shareWith: Set<UserID>
     @State private var saving = false
+    @State private var confirmDelete = false
 
+    init(editing: CheckIn? = nil) {
+        self.editing = editing
+        _pick = State(initialValue: editing.map { $0.isResting ? Self.restingID : $0.mood })
+        _note = State(initialValue: editing?.note ?? "")
+        _noReply = State(initialValue: editing?.noReply ?? false)
+        _need = State(initialValue: editing?.need)
+        _social = State(initialValue: editing?.capacity.social)
+        _sensory = State(initialValue: editing?.capacity.sensory)
+        _talk = State(initialValue: editing?.capacity.talk)
+        _shareWith = State(initialValue: editing?.sharedWith ?? [])
+    }
+
+    private var isEditing: Bool { editing != nil }
     private var resting: Bool { pick == Self.restingID }
     private var multiFriend: Bool { vm.friends.count > 1 }
     private var canSave: Bool {
@@ -51,11 +68,15 @@ struct LogMoodSheet: View {
                     if multiFriend {
                         section("Share with", t) { shareRow(t) }
                     }
+
+                    if isEditing {
+                        deleteButton(t)
+                    }
                 }
                 .padding(16)
             }
             .background(Color(t.bg).ignoresSafeArea())
-            .navigationTitle("Log mood")
+            .navigationTitle(isEditing ? "Edit check-in" : "Log mood")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -65,6 +86,14 @@ struct LogMoodSheet: View {
                     Button("Save") { Task { await save() } }
                         .disabled(!canSave)
                 }
+            }
+            .confirmationDialog("Delete this check-in?",
+                                isPresented: $confirmDelete,
+                                titleVisibility: .visible) {
+                Button("Delete", role: .destructive) { Task { await delete() } }
+                Button("Keep it", role: .cancel) {}
+            } message: {
+                Text("It will be removed for everyone it was shared with. This can't be undone.")
             }
         }
         .preferredColorScheme(.dark)
@@ -77,6 +106,12 @@ struct LogMoodSheet: View {
         LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
             ForEach(vm.presets) { p in
                 tile(id: p.id, title: p.title, dots: Energy.dots(p.energy), t)
+            }
+            // Editing an entry whose preset has since been renamed/removed:
+            // keep its mood selectable so saving doesn't silently change it.
+            if let m = editing?.mood, !m.isEmpty,
+               !vm.presets.contains(where: { $0.id == m }) {
+                tile(id: m, title: m, dots: nil, t)
             }
             tile(id: Self.restingID, title: "🌙 Resting", dots: nil, t)
         }
@@ -161,6 +196,18 @@ struct LogMoodSheet: View {
         }
     }
 
+    private func deleteButton(_ t: Theme) -> some View {
+        Button(role: .destructive) { confirmDelete = true } label: {
+            Label("Delete check-in", systemImage: "trash")
+                .frame(maxWidth: .infinity).padding(.vertical, 12)
+                .foregroundStyle(Color(t.accentPartner))
+                .background(Color(t.card), in: Capsule())
+                .overlay(Capsule().stroke(Color(t.borderPartner)))
+        }
+        .buttonStyle(.plain)
+        .disabled(saving)
+    }
+
     private func section<C: View>(_ title: String, _ t: Theme,
                                   @ViewBuilder _ content: () -> C) -> some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -181,12 +228,51 @@ struct LogMoodSheet: View {
 
     private func save() async {
         saving = true
-        let preset = resting ? nil : vm.presets.first { $0.id == pick }
-        let cap = resting ? Capacity() : Capacity(social: social, sensory: sensory, talk: talk)
-        await vm.logMood(preset, note: note, noReply: noReply, need: need,
-                         capacity: cap, sharedWith: shareWith)
+        if let original = editing {
+            await vm.saveEdit(edited(from: original))
+        } else {
+            let preset = resting ? nil : vm.presets.first { $0.id == pick }
+            let cap = resting ? Capacity() : Capacity(social: social, sensory: sensory, talk: talk)
+            await vm.logMood(preset, note: note, noReply: noReply, need: need,
+                             capacity: cap, sharedWith: shareWith)
+        }
         saving = false
         if vm.errorMessage == nil { dismiss() }
+    }
+
+    private func delete() async {
+        guard let id = editing?.id else { return }
+        saving = true
+        await vm.delete(id)
+        saving = false
+        if vm.errorMessage == nil { dismiss() }
+    }
+
+    /// Applies the form to the original, keeping id/createdAt (the store
+    /// preserves createdAt and stamps editedAt).
+    private func edited(from o: CheckIn) -> CheckIn {
+        var c = o
+        c.note = note
+        c.noReply = noReply
+        c.need = need
+        c.sharedWith = shareWith.isEmpty ? o.sharedWith : shareWith
+
+        if resting {
+            c.isResting = true
+            c.mood = ""
+            c.capacity = Capacity()
+        } else {
+            let mood = pick ?? o.mood
+            c.isResting = false
+            c.mood = mood
+            var cap = Capacity(energy: o.capacity.energy, social: social, sensory: sensory, talk: talk)
+            // Mood changed -> take the new preset's energy; unchanged -> keep stored energy.
+            if mood != o.mood, let p = vm.presets.first(where: { $0.id == mood }) {
+                cap.energy = p.energy
+            }
+            c.capacity = cap
+        }
+        return c
     }
 }
 

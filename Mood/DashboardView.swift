@@ -3,7 +3,19 @@ import MoodCore
 
 struct DashboardView: View {
     @Environment(DashboardViewModel.self) private var vm
-    @State private var showLog = false
+    @State private var route: SheetRoute?
+
+    private enum SheetRoute: Identifiable {
+        case log
+        case edit(CheckIn)
+
+        var id: String {
+            switch self {
+            case .log: "log"
+            case .edit(let c): "edit-\(c.id)"
+            }
+        }
+    }
 
     var body: some View {
         let t = vm.theme
@@ -18,7 +30,8 @@ struct DashboardView: View {
                 HeroCard(heading: "You",
                          checkIn: vm.mine, presets: vm.presets, theme: t,
                          accent: t.accentMe, fill: t.heroMe, stroke: t.border,
-                         alert: vm.myAlert)
+                         alert: vm.myAlert,
+                         onEdit: vm.mine.map { c in { route = .edit(c) } })
 
                 HeroCard(heading: vm.selectedFriend?.name ?? "Friend",
                          checkIn: vm.theirs, presets: vm.presets, theme: t,
@@ -32,7 +45,7 @@ struct DashboardView: View {
         .animation(.snappy, value: vm.theme.id)
         .safeAreaInset(edge: .bottom) {
             HStack(spacing: 10) {
-                Button { showLog = true } label: {
+                Button { route = .log } label: {
                     Label("Log mood", systemImage: "plus")
                         .frame(maxWidth: .infinity).padding(.vertical, 12)
                         .background(Color(t.btnPrimary), in: Capsule())
@@ -51,6 +64,11 @@ struct DashboardView: View {
             .padding(.horizontal, 16).padding(.vertical, 8)
             .background(.ultraThinMaterial)
         }
-        .sheet(isPresented: $showLog) { LogMoodSheet() }
+        .sheet(item: $route) { r in
+            switch r {
+            case .log: LogMoodSheet()
+            case .edit(let c): LogMoodSheet(editing: c)
+            }
+        }
     }
 }

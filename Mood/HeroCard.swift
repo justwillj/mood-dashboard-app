@@ -9,12 +9,28 @@ struct HeroCard: View {
     let accent: HexColor, fill: HexColor, stroke: HexColor
     var stale = false
     var alert: LowEnergyAlert?
+    /// Non-nil makes the card editable (tap anywhere, or the pencil).
+    var onEdit: (() -> Void)?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text(heading.uppercased())
-                .font(.caption.weight(.semibold)).tracking(1.2)
-                .foregroundStyle(Color(accent))
+            HStack {
+                Text(heading.uppercased())
+                    .font(.caption.weight(.semibold)).tracking(1.2)
+                    .foregroundStyle(Color(accent))
+                Spacer()
+                if let onEdit {
+                    Button(action: onEdit) {
+                        Image(systemName: "pencil")
+                            .font(.footnote.weight(.semibold))
+                            .padding(8)
+                            .foregroundStyle(Color(theme.textDim))
+                            .background(Color(theme.cardSec), in: Circle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Edit check-in")
+                }
+            }
 
             if let c = checkIn { content(c) }
             else { Text("No check-in yet").foregroundStyle(Color(theme.textDim)) }
@@ -29,6 +45,8 @@ struct HeroCard: View {
         .background(Color(fill), in: RoundedRectangle(cornerRadius: 22))
         .overlay(RoundedRectangle(cornerRadius: 22).stroke(Color(stroke)))
         .opacity(stale ? 0.7 : 1)
+        .contentShape(RoundedRectangle(cornerRadius: 22))
+        .onTapGesture { onEdit?() }
     }
 
     @ViewBuilder private func content(_ c: CheckIn) -> some View {
