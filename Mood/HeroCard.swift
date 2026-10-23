@@ -1,6 +1,18 @@
 import SwiftUI
 import MoodCore
 
+/// Single source of truth for the detail chips shown on hero cards and history rows.
+extension CheckIn {
+    var detailChips: [String] {
+        [need?.fullLabel,
+         capacity.social.map { "Social: \($0)/5" },
+         capacity.sensory.map { "Sensory: \($0)/5" },
+         capacity.talk?.label,
+         noReply ? "🤫 No reply needed" : nil]
+            .compactMap { $0 }
+    }
+}
+
 struct HeroCard: View {
     let heading: String
     let checkIn: CheckIn?
@@ -61,8 +73,7 @@ struct HeroCard: View {
             Text(c.note).font(.body).foregroundStyle(Color(theme.note))
         }
 
-        let chips = [c.need?.fullLabel, c.capacity.talk?.label, c.noReply ? "🤫 No reply needed" : nil]
-            .compactMap { $0 }
+        let chips = c.detailChips
         if !chips.isEmpty {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack { ForEach(chips, id: \.self) { chip($0) } }

@@ -151,9 +151,8 @@ struct HistoryView: View {
                 if !c.note.isEmpty {
                     Text(c.note).font(.subheadline).foregroundStyle(Color(t.note))
                 }
-
-                let chips = [c.need?.fullLabel, c.capacity.talk?.label, c.noReply ? "🤫 No reply needed" : nil]
-                    .compactMap { $0 }
+                
+                let chips = c.detailChips
                 if !chips.isEmpty {
                     Text(chips.joined(separator: "  ·  "))
                         .font(.caption).foregroundStyle(Color(t.textDim))
